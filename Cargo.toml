@@ -1,0 +1,22 @@
+[package]
+name = "tenors"
+version = "0.1.0"
+edition = "2024"
+authors = ["Daniel Probst <daniel@probst.dev>"]
+description = "A library for working with financial tenors and futures contract codes"
+license = "GPL-3.0"
+repository = "https://git.sr.ht/~danprobst/tenors"
+readme = "README.md"
+keywords = ["finance", "tenor", "futures", "trading"]
+categories = ["finance", "date-and-time"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+env_logger = "0.11"
+log = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
