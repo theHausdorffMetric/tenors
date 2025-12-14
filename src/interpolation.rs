@@ -21,7 +21,7 @@
 //! let interpolated = interpolate_from_covers(
 //!     &mut curve,
 //!     TenorType::Month,
-//!     |t, v| TenorPoint::new(t, v),
+//!     TenorPoint::new,
 //! ).unwrap();
 //!
 //! // H25 (March 2025) was interpolated
@@ -145,7 +145,7 @@ impl TenorValue for TenorPoint {
 /// let interpolated = interpolate_from_covers(
 ///     &mut curve,
 ///     TenorType::Month,
-///     |t, v| TenorPoint::new(t, v),
+///     TenorPoint::new,
 /// ).unwrap();
 ///
 /// assert_eq!(interpolated.len(), 1);
@@ -299,7 +299,7 @@ mod tests {
         ];
 
         let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, |t, v| TenorPoint::new(t, v))
+            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
                 .unwrap();
 
         assert_eq!(interpolated.len(), 1);
@@ -323,7 +323,7 @@ mod tests {
         ];
 
         let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, |t, v| TenorPoint::new(t, v))
+            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
                 .unwrap();
 
         assert_eq!(interpolated.len(), 2);
@@ -348,7 +348,7 @@ mod tests {
         let mut curve = vec![TenorPoint::new("1Q25".parse().unwrap(), 100.0)];
 
         let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, |t, v| TenorPoint::new(t, v))
+            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
                 .unwrap();
 
         // All 3 months of Q1 should be interpolated
@@ -384,7 +384,7 @@ mod tests {
         ];
 
         let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, |t, v| TenorPoint::new(t, v))
+            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
                 .unwrap();
 
         assert!(interpolated.is_empty());
@@ -445,7 +445,7 @@ mod tests {
         ];
 
         let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Quarter, |t, v| TenorPoint::new(t, v))
+            interpolate_from_covers(&mut curve, TenorType::Quarter, TenorPoint::new)
                 .unwrap();
 
         assert_eq!(interpolated.len(), 2);
@@ -477,7 +477,7 @@ mod tests {
         ];
 
         let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, |t, v| TenorPoint::new(t, v))
+            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
                 .unwrap();
 
         assert_eq!(interpolated.len(), 1);

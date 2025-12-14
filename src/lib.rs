@@ -289,23 +289,22 @@ impl Tenor {
     /// let my_month = Tenor::month_from_futures_code("F2024").unwrap();
     /// println!("F2024 is parsed into {:?} resp {}", my_month, my_month);
     /// ```
-
     pub fn month_from_futures_code(fc: &str) -> Result<Tenor, TenorsError> {
-        if fc.len() == 3 {
-            if let (Some(month), Ok(year)) = (
+        if fc.len() == 3
+            && let (Some(month), Ok(year)) = (
                 futures_code_month0(fc.chars().next().unwrap()),
                 fc[1..3].parse::<isize>(),
-            ) {
-                return Ok(Tenor::month_from_ym0(year + 2000, month));
-            }
+            )
+        {
+            return Ok(Tenor::month_from_ym0(year + 2000, month));
         }
-        if fc.len() == 5 {
-            if let (Some(month), Ok(year)) = (
+        if fc.len() == 5
+            && let (Some(month), Ok(year)) = (
                 futures_code_month0(fc.chars().next().unwrap()),
                 fc[1..5].parse::<isize>(),
-            ) {
-                return Ok(Tenor::month_from_ym0(year, month));
-            }
+            )
+        {
+            return Ok(Tenor::month_from_ym0(year, month));
         }
         Err(TenorsError::UnparsableTenorString(fc.to_string()))
     }
@@ -642,7 +641,7 @@ fn parse_quarter_format(s: &str) -> Result<Tenor, TenorsError> {
             let quarter = before
                 .parse::<isize>()
                 .ok()
-                .filter(|&q| q >= 1 && q <= 4)
+                .filter(|q| (1..=4).contains(q))
                 .ok_or_else(|| TenorsError::UnparsableTenorString(s.to_string()))?;
 
             let year = parse_year_part(after, s)?;
@@ -654,7 +653,7 @@ fn parse_quarter_format(s: &str) -> Result<Tenor, TenorsError> {
             let quarter = after
                 .parse::<isize>()
                 .ok()
-                .filter(|&q| q >= 1 && q <= 4)
+                .filter(|q| (1..=4).contains(q))
                 .ok_or_else(|| TenorsError::UnparsableTenorString(s.to_string()))?;
 
             Ok(Tenor::quarter_from_yq0(year, quarter - 1))
@@ -676,7 +675,7 @@ fn parse_halfyear_format(s: &str) -> Result<Tenor, TenorsError> {
             let half = before
                 .parse::<isize>()
                 .ok()
-                .filter(|&h| h >= 1 && h <= 2)
+                .filter(|h| (1..=2).contains(h))
                 .ok_or_else(|| TenorsError::UnparsableTenorString(s.to_string()))?;
 
             let year = parse_year_part(after, s)?;
@@ -694,7 +693,7 @@ fn parse_halfyear_format(s: &str) -> Result<Tenor, TenorsError> {
             let half = after
                 .parse::<isize>()
                 .ok()
-                .filter(|&h| h >= 1 && h <= 2)
+                .filter(|h| (1..=2).contains(h))
                 .ok_or_else(|| TenorsError::UnparsableTenorString(s.to_string()))?;
 
             // Create half-year tenor
@@ -1390,7 +1389,7 @@ mod tests {
             "1H24".parse::<Tenor>().unwrap(),
             Tenor {
                 tenor_type: TenorType::HalfYear,
-                epoch_offset: ((current_century as isize + 24) - TENOR_EPOCH) * 2 + 0
+                epoch_offset: ((current_century as isize + 24) - TENOR_EPOCH) * 2
             }
         );
         assert_eq!(
@@ -1406,7 +1405,7 @@ mod tests {
             "1H2024".parse::<Tenor>().unwrap(),
             Tenor {
                 tenor_type: TenorType::HalfYear,
-                epoch_offset: (2024 - TENOR_EPOCH) * 2 + 0
+                epoch_offset: (2024 - TENOR_EPOCH) * 2
             }
         );
         assert_eq!(
@@ -1422,7 +1421,7 @@ mod tests {
             "24H1".parse::<Tenor>().unwrap(),
             Tenor {
                 tenor_type: TenorType::HalfYear,
-                epoch_offset: ((current_century as isize + 24) - TENOR_EPOCH) * 2 + 0
+                epoch_offset: ((current_century as isize + 24) - TENOR_EPOCH) * 2
             }
         );
         assert_eq!(
@@ -1438,7 +1437,7 @@ mod tests {
             "2024H1".parse::<Tenor>().unwrap(),
             Tenor {
                 tenor_type: TenorType::HalfYear,
-                epoch_offset: (2024 - TENOR_EPOCH) * 2 + 0
+                epoch_offset: (2024 - TENOR_EPOCH) * 2
             }
         );
         assert_eq!(

@@ -2,7 +2,6 @@ use anyhow::Result;
 use tenors::*;
 
 fn main() -> Result<()> {
-    env_logger::init();
 
     println!("\nTenors Testing:");
 

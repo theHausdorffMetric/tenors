@@ -5,7 +5,6 @@ use tenors::interpolation::{interpolate_from_covers, validate_curve, TenorPoint}
 use tenors::TenorType;
 
 fn main() -> Result<()> {
-    env_logger::init();
 
     println!("=== Forward Curve Interpolation Example ===\n");
 
@@ -25,7 +24,7 @@ fn main() -> Result<()> {
     }
 
     let interpolated =
-        interpolate_from_covers(&mut curve, TenorType::Month, |t, v| TenorPoint::new(t, v))?;
+        interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)?;
 
     println!("\nInterpolated tenors: {:?}", interpolated);
     println!("\nAfter interpolation:");
@@ -49,7 +48,7 @@ fn main() -> Result<()> {
     }
 
     let interpolated2 =
-        interpolate_from_covers(&mut curve2, TenorType::Month, |t, v| TenorPoint::new(t, v))?;
+        interpolate_from_covers(&mut curve2, TenorType::Month, TenorPoint::new)?;
 
     println!("\nInterpolated tenors: {:?}", interpolated2);
     println!("\nAfter interpolation:");
@@ -73,9 +72,8 @@ fn main() -> Result<()> {
         println!("  {} = {:.2}", p.tenor, p.value);
     }
 
-    let interpolated3 = interpolate_from_covers(&mut curve3, TenorType::Quarter, |t, v| {
-        TenorPoint::new(t, v)
-    })?;
+    let interpolated3 =
+        interpolate_from_covers(&mut curve3, TenorType::Quarter, TenorPoint::new)?;
 
     println!("\nInterpolated tenors: {:?}", interpolated3);
     println!("\nAfter interpolation:");
@@ -151,7 +149,7 @@ fn main() -> Result<()> {
     }
 
     let interpolated6 =
-        interpolate_from_covers(&mut curve6, TenorType::Month, |t, v| TenorPoint::new(t, v))?;
+        interpolate_from_covers(&mut curve6, TenorType::Month, TenorPoint::new)?;
 
     println!("\nInterpolated {} tenors", interpolated6.len());
     println!("\nAfter interpolation:");
