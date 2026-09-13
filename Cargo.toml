@@ -1,21 +1,21 @@
 [package]
 name = "tenors"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.98"
 authors = ["Daniel Probst <daniel@probst.dev>"]
 description = "A library for working with financial tenors and futures contract codes"
 license = "GPL-3.0-or-later"
-repository = "https://git.sr.ht/~danprobst/tenors"
+repository = "https://github.com/theHausdorffMetric/tenors"
 readme = "README.md"
 keywords = ["finance", "tenor", "futures", "trading"]
 categories = ["finance", "date-and-time"]
-exclude = ["CLAUDE.md", "tenors_interpolation.md", "CODE_REVIEW*.md"]
+include = ["src/**", "examples/*.rs", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 
 [dependencies]
 chrono = "0.4"
-log = "0.4"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [dev-dependencies]
-anyhow = "1"
+serde_json = "1"

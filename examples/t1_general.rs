@@ -1,11 +1,9 @@
-use anyhow::Result;
+//! A tour of the core API.
+
 use tenors::*;
 
-fn main() -> Result<()> {
-
-    println!("\nTenors Testing:");
-
-    // test  vector
+fn main() -> Result<(), TenorsError> {
+    println!("Tenors tour\n");
 
     let test_vector: Vec<Tenor> = vec![
         Tenor::new(TenorType::Year, 10),
@@ -17,88 +15,87 @@ fn main() -> Result<()> {
         Tenor::new(TenorType::HalfMonth, 264),
     ];
 
-    println!("\nOur test vector consists of:");
-    for i in &test_vector {
-        println!("{i:?} display: {i}",);
+    println!("Our test vector consists of:");
+    for t in &test_vector {
+        println!("  {t:?} displays as {t}");
     }
 
-    println!("\nTesting direct addition of isize to Tenor");
-    for i in &test_vector {
-        let tst = i + 1;
-        println!("{i:?} resp. {i} +  1 = {:?} {}", tst, tst);
-    }
-    for i in &test_vector {
-        let tst = i - 1;
-        println!("{i:?} resp. {i} -  1 = {:?} {}", tst, tst);
-    }
-    for i in &test_vector {
-        let tst = i + 11;
-        println!("{i:?} resp. {i} +  11 = {:?} {}", tst, tst);
-    }
-    for i in &test_vector {
-        let tst = i - 11;
-        println!("{i:?} resp. {i} -  11 = {:?} {}", tst, tst);
+    println!("\nAdding and subtracting offsets");
+    for t in &test_vector {
+        println!("  {t} + 1 = {}, {t} - 11 = {}", *t + 1, *t - 11);
     }
 
-    println!("\nTesting addition of TenorDuration to Tenor");
-    for i in &test_vector {
-        for j in TenorType::iterator() {
-            match i + TenorDuration::new(j) {
-                Ok(x) => println!("{i} + TenorDuration{j:?} = {x}"),
-                Err(x) => println!("{i} + TenorDuration{j:?} = {x:?}"),
-            };
+    println!("\nAdding a TenorDuration of every type");
+    for t in &test_vector {
+        for ty in TenorType::iterator() {
+            match *t + TenorDuration::new(ty) {
+                Ok(x) => println!("  {t} + 1 {ty:?} = {x}"),
+                Err(e) => println!("  {t} + 1 {ty:?}: {e}"),
+            }
         }
     }
 
-    println!("\nTesting partitioning of Tenor");
-    for i in &test_vector {
-        println!("Partitioning {i}");
-        for j in TenorType::iterator() {
-            match i.partition(j) {
-                Some(x) => println!(
-                    "{i}: [{}]",
-                    x.iter()
-                        .map(|z| z.to_string())
-                        .collect::<Vec<String>>()
+    println!("\nPartitioning");
+    for t in &test_vector {
+        for ty in TenorType::iterator() {
+            match t.partition(ty) {
+                Some(parts) => println!(
+                    "  {t} into {ty:?}: [{}]",
+                    parts
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                None => println!("Cannot partition {:?} into {j:?}", i.get_tenor_type()),
-            };
+                None => println!("  {t} cannot be partitioned into {ty:?}"),
+            }
         }
     }
 
-    println!("\nTesting cover function.");
-    for i in &test_vector {
-        println!("Covering {i}");
-        for j in TenorType::iterator() {
-            match i.cover(j) {
-                Some(x) => println!("{x} covers {i}",),
-                None => println!("No {j:?} covering {:?}", i.get_tenor_type()),
-            };
+    println!("\nCovering");
+    for t in &test_vector {
+        for ty in TenorType::iterator() {
+            match t.cover(ty) {
+                Some(c) => println!("  {c} covers {t}"),
+                None => println!("  no {ty:?} covers {t}"),
+            }
         }
     }
 
-    println!("\nTesting year() and month0() functions.");
-    for i in &test_vector {
+    println!("\nCalendar");
+    for t in &test_vector {
         println!(
-            "{i:?} display: {i} with year {:?} and month0 {:?}",
-            i.year(),
-            i.month0(),
+            "  {t}: year {} month0 {:?} quarter0 {:?}, {} .. {}",
+            t.year(),
+            t.month0(),
+            t.quarter0(),
+            t.first_day()
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "?".into()),
+            t.last_day()
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "?".into()),
         );
     }
 
-    println!("\nTesting first and last functions.");
-    for i in &test_vector {
-        println!(
-            "{i:?} display: {i} with first {} and last {}",
-            i.first_day(),
-            i.last_day(),
-        );
+    println!("\nParsing");
+    for s in [
+        "F24", "F7", "F2024", "1Q24", "24Q1", "2H2025", "Cal24", "2024", "2HF24", "DEC 32",
+    ] {
+        let parsed = if s.contains(' ') {
+            cme_tenor_parser(s)
+        } else {
+            s.parse::<Tenor>()
+        };
+        match parsed {
+            Ok(t) => println!("  {s:>7} -> {t:?} -> {t}"),
+            Err(e) => println!("  {s:>7} -> {e}"),
+        }
     }
-
-    println!("\nTesting futures code stuff.");
-    println!("F24: {}", Tenor::month_from_futures_code("F24").unwrap());
-    println!("F24: {:?}", Tenor::month_from_futures_code("F24"));
+    println!(
+        "  F24 relative to 1950: {}",
+        Tenor::parse_with_reference("F24", 1950)?
+    );
 
     Ok(())
 }

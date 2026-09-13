@@ -1,14 +1,22 @@
-//! Interpolation for forward curves with mixed tenor granularities.
+//! Interpolation for forward curves quoted at mixed granularities.
 //!
-//! This module provides functionality to interpolate missing tenor values
-//! in forward curves using cover constraints. When a coarser tenor (e.g., a quarter)
-//! covers finer tenors (e.g., months), the arithmetic average constraint can be
-//! used to infer missing values.
+//! A coarser tenor (a quarter) *covers* finer ones (its three months). When a
+//! curve carries the coarser value and some of the finer ones, the
+//! arithmetic-average constraint
+//!
+//! ```text
+//! value(cover) = average(value(partition elements))
+//! ```
+//!
+//! determines what the missing finer values must sum to; they are filled
+//! flat. Covers are processed finest-first, so the tightest constraint fills
+//! first and a coarser cover only distributes over what is still missing;
+//! covers that contradict each other are reported, never silently averaged.
 //!
 //! # Example
 //!
 //! ```
-//! use tenors::{Tenor, TenorType};
+//! use tenors::TenorType;
 //! use tenors::interpolation::{TenorPoint, interpolate_from_covers};
 //!
 //! let mut curve = vec![
@@ -16,16 +24,8 @@
 //!     TenorPoint::new("G25".parse().unwrap(), 105.0),
 //!     TenorPoint::new("1Q25".parse().unwrap(), 103.33),
 //! ];
-//!
-//! // Interpolate missing months using quarter constraints
-//! let interpolated = interpolate_from_covers(
-//!     &mut curve,
-//!     TenorType::Month,
-//!     TenorPoint::new,
-//! ).unwrap();
-//!
-//! // H25 (March 2025) was interpolated
-//! assert_eq!(interpolated.len(), 1);
+//! let added = interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new).unwrap();
+//! assert_eq!(added.len(), 1); // H25
 //! ```
 
 use std::collections::HashMap;
@@ -34,49 +34,35 @@ use thiserror::Error;
 
 use crate::{Tenor, TenorType};
 
-/// Errors that can occur during curve interpolation.
-#[derive(Error, Debug)]
+/// Errors from curve interpolation and validation.
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum InterpolationError {
-    /// No cover constraint is available to interpolate the given tenor.
-    #[error("no cover constraint available for tenor {0}")]
-    NoCoverConstraint(Tenor),
-
-    /// The curve is inconsistent: the cover value doesn't match the partition average.
-    #[error("inconsistent curve: cover {cover} has value {cover_value}, but partition average is {partition_avg}")]
+    /// A cover's value is not the average of its partition elements.
+    #[error(
+        "inconsistent curve: cover {cover} has value {cover_value}, but its partition averages {partition_avg}"
+    )]
     InconsistentCurve {
         /// The cover tenor.
         cover: Tenor,
-        /// The value assigned to the cover.
+        /// The cover's value.
         cover_value: f64,
-        /// The computed average of the partition elements.
+        /// The average of its partition elements.
         partition_avg: f64,
     },
-
-    /// All partition elements were missing (now handled with constant interpolation).
-    /// This variant is kept for backwards compatibility but is no longer returned.
-    #[error("all partition elements missing for {0} (using constant interpolation)")]
-    #[allow(dead_code)]
-    AllPartitionElementsMissing(Tenor),
 }
 
-/// Trait for objects that associate a tenor with a numeric value.
-///
-/// Implement this trait for your own types to use them with the interpolation functions.
+/// Something that pairs a tenor with a value.
 pub trait TenorValue {
-    /// Returns a reference to the tenor.
-    fn tenor(&self) -> &Tenor;
-
-    /// Returns the numeric value associated with this tenor.
+    /// The tenor.
+    fn tenor(&self) -> Tenor;
+    /// The value.
     fn value(&self) -> f64;
-
-    /// Sets the numeric value.
+    /// Replace the value.
     fn set_value(&mut self, value: f64);
 }
 
-/// A simple tenor-value pair.
-///
-/// This is a convenient default implementation of [`TenorValue`] for basic use cases.
-#[derive(Debug, Clone, PartialEq)]
+/// The plain tenor–value pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TenorPoint {
     /// The tenor.
     pub tenor: Tenor,
@@ -85,203 +71,126 @@ pub struct TenorPoint {
 }
 
 impl TenorPoint {
-    /// Creates a new tenor point.
+    /// A new point.
     pub fn new(tenor: Tenor, value: f64) -> Self {
         Self { tenor, value }
     }
 }
 
 impl TenorValue for TenorPoint {
-    fn tenor(&self) -> &Tenor {
-        &self.tenor
+    fn tenor(&self) -> Tenor {
+        self.tenor
     }
-
     fn value(&self) -> f64 {
         self.value
     }
-
     fn set_value(&mut self, value: f64) {
         self.value = value;
     }
 }
 
-/// Interpolates missing finer-granularity tenors using cover constraints.
+/// Fill in the `target_type` tenors that the curve's coarser covers imply.
 ///
-/// For each coarser tenor in the curve, this function checks if its partition elements
-/// (at `target_type` granularity) exist. Missing elements are filled in using the
-/// arithmetic average constraint:
+/// Every tenor coarser than `target_type` is a cover; covers are processed
+/// finest-first. For each, the missing partition elements get the same value,
+/// chosen so that the partition averages to the cover's value; if none of the
+/// elements exist yet, they all get the cover's value. New points are created
+/// with `create_point` and appended to `curve`.
 ///
-/// ```text
-/// value(cover) = average(value(partition_elements))
-/// ```
+/// After filling, every cover whose partition is complete is checked; a cover
+/// whose value differs from its partition's average by more than `tolerance`
+/// makes the call fail with [`InterpolationError::InconsistentCurve`] —
+/// contradictory covers are an error, not a silently averaged curve. The
+/// curve is left with the points added so far.
 ///
-/// # Arguments
-///
-/// * `curve` - The curve to interpolate, modified in place with new points added.
-/// * `target_type` - The granularity to interpolate to (e.g., `TenorType::Month`).
-/// * `create_point` - A factory function to create new points of type `T`.
-///
-/// # Returns
-///
-/// A list of tenors that were interpolated (newly created).
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - All partition elements are missing for a cover (nothing to anchor the interpolation).
-///
-/// # Example
-///
-/// ```
-/// use tenors::{Tenor, TenorType};
-/// use tenors::interpolation::{TenorPoint, interpolate_from_covers};
-///
-/// let mut curve = vec![
-///     TenorPoint::new("F25".parse().unwrap(), 100.0),
-///     TenorPoint::new("G25".parse().unwrap(), 105.0),
-///     TenorPoint::new("1Q25".parse().unwrap(), 103.33),
-/// ];
-///
-/// let interpolated = interpolate_from_covers(
-///     &mut curve,
-///     TenorType::Month,
-///     TenorPoint::new,
-/// ).unwrap();
-///
-/// assert_eq!(interpolated.len(), 1);
-/// ```
+/// Returns the tenors that were added.
 pub fn interpolate_from_covers<T: TenorValue>(
     curve: &mut Vec<T>,
     target_type: TenorType,
+    tolerance: f64,
     create_point: impl Fn(Tenor, f64) -> T,
 ) -> Result<Vec<Tenor>, InterpolationError> {
-    let mut interpolated = Vec::new();
-
-    // Build a lookup map: tenor -> index in curve
-    let mut tenor_index: HashMap<Tenor, usize> = HashMap::new();
-    for (idx, point) in curve.iter().enumerate() {
-        tenor_index.insert(point.tenor().clone(), idx);
-    }
-
-    // Collect covers (tenors coarser than target_type)
-    let covers: Vec<(Tenor, f64)> = curve
+    let mut index: HashMap<Tenor, usize> = curve
         .iter()
-        .filter(|p| p.tenor().get_tenor_type() > target_type)
-        .map(|p| (p.tenor().clone(), p.value()))
+        .enumerate()
+        .map(|(i, p)| (p.tenor(), i))
         .collect();
 
-    // Process each cover
-    for (cover_tenor, cover_value) in covers {
-        // Get partition elements at target granularity
-        let partition = match cover_tenor.partition(target_type) {
-            Some(p) => p,
-            None => continue, // Shouldn't happen if tenor_type > target_type
+    let mut covers: Vec<(Tenor, f64)> = curve
+        .iter()
+        .filter(|p| p.tenor().tenor_type() > target_type)
+        .map(|p| (p.tenor(), p.value()))
+        .collect();
+    covers.sort_by(|a, b| a.0.cmp_by_granularity(&b.0));
+
+    let mut added = Vec::new();
+    for (cover, cover_value) in covers {
+        let Some(partition) = cover.partition(target_type) else {
+            continue;
         };
-
-        let n = partition.len() as f64;
-
-        // Separate into present and missing
-        let mut present_sum = 0.0;
-        let mut present_count = 0usize;
-        let mut missing: Vec<Tenor> = Vec::new();
-
-        for part_tenor in &partition {
-            if let Some(&idx) = tenor_index.get(part_tenor) {
-                present_sum += curve[idx].value();
-                present_count += 1;
-            } else {
-                missing.push(part_tenor.clone());
+        let (mut present_sum, mut present_count) = (0.0, 0usize);
+        let mut missing = Vec::new();
+        for part in &partition {
+            match index.get(part) {
+                Some(&i) => {
+                    present_sum += curve[i].value();
+                    present_count += 1;
+                }
+                None => missing.push(*part),
             }
         }
-
-        // If nothing is missing, skip (could optionally validate consistency here)
         if missing.is_empty() {
             continue;
         }
-
-        // Compute the value for missing elements
-        // If all are missing, use constant interpolation (flat at cover value)
-        // Otherwise: sum(all) = n * cover_value
-        //            sum(missing) = n * cover_value - sum(present)
-        //            Each missing element gets: sum(missing) / count(missing)
-        let missing_value = if present_count == 0 {
-            // All missing: use constant function (flat at cover value)
+        let fill = if present_count == 0 {
             cover_value
         } else {
-            let total_sum = n * cover_value;
-            let missing_sum = total_sum - present_sum;
-            missing_sum / missing.len() as f64
+            (partition.len() as f64 * cover_value - present_sum) / missing.len() as f64
         };
-
-        // Add missing points to curve
         for tenor in missing {
-            let new_point = create_point(tenor.clone(), missing_value);
-            tenor_index.insert(tenor.clone(), curve.len());
-            curve.push(new_point);
-            interpolated.push(tenor);
+            index.insert(tenor, curve.len());
+            curve.push(create_point(tenor, fill));
+            added.push(tenor);
         }
     }
 
-    Ok(interpolated)
+    validate_curve(curve, target_type, tolerance)?;
+    Ok(added)
 }
 
-/// Validates that all cover constraints are satisfied within tolerance.
-///
-/// For each coarser tenor in the curve, this function checks that the arithmetic
-/// average of its partition elements equals the cover value (within tolerance).
-///
-/// # Arguments
-///
-/// * `curve` - The curve to validate.
-/// * `target_type` - The granularity to validate against.
-/// * `tolerance` - The maximum allowed difference between cover value and partition average.
-///
-/// # Returns
-///
-/// `Ok(())` if all constraints are satisfied, otherwise an error describing the inconsistency.
+/// Check every cover whose partition at `target_type` is complete: its value
+/// must equal the partition's average within `tolerance`. Covers with missing
+/// partition elements are skipped.
 pub fn validate_curve<T: TenorValue>(
     curve: &[T],
     target_type: TenorType,
     tolerance: f64,
 ) -> Result<(), InterpolationError> {
-    // Build a lookup map
-    let tenor_map: HashMap<&Tenor, f64> = curve.iter().map(|p| (p.tenor(), p.value())).collect();
-
-    // Check each cover
-    for point in curve.iter() {
-        let tenor = point.tenor();
-        if tenor.get_tenor_type() <= target_type {
+    let values: HashMap<Tenor, f64> = curve.iter().map(|p| (p.tenor(), p.value())).collect();
+    for point in curve {
+        let cover = point.tenor();
+        if cover.tenor_type() <= target_type {
             continue;
         }
-
-        let partition = match tenor.partition(target_type) {
-            Some(p) => p,
-            None => continue,
+        let Some(partition) = cover.partition(target_type) else {
+            continue;
         };
-
-        // Check if all partition elements exist
-        let values: Vec<f64> = partition
+        let found: Vec<f64> = partition
             .iter()
-            .filter_map(|t| tenor_map.get(t).copied())
+            .filter_map(|t| values.get(t).copied())
             .collect();
-
-        if values.len() != partition.len() {
-            // Not all partition elements present, skip validation
+        if found.len() != partition.len() {
             continue;
         }
-
-        let partition_avg = values.iter().sum::<f64>() / values.len() as f64;
-        let cover_value = point.value();
-
-        if (partition_avg - cover_value).abs() > tolerance {
+        let partition_avg = found.iter().sum::<f64>() / found.len() as f64;
+        if (partition_avg - point.value()).abs() > tolerance {
             return Err(InterpolationError::InconsistentCurve {
-                cover: tenor.clone(),
-                cover_value,
+                cover,
+                cover_value: point.value(),
                 partition_avg,
             });
         }
     }
-
     Ok(())
 }
 
@@ -289,204 +198,226 @@ pub fn validate_curve<T: TenorValue>(
 mod tests {
     use super::*;
 
+    fn t(s: &str) -> Tenor {
+        s.parse().unwrap()
+    }
+    fn value(curve: &[TenorPoint], s: &str) -> f64 {
+        curve
+            .iter()
+            .find(|p| p.tenor == t(s))
+            .unwrap_or_else(|| panic!("{s} missing"))
+            .value
+    }
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
     #[test]
-    fn test_interpolate_single_missing_month() {
-        // F25=100, G25=105, 1Q25=103.33 → H25 should be ~104.99
+    fn single_missing_month() {
         let mut curve = vec![
-            TenorPoint::new("F25".parse().unwrap(), 100.0),
-            TenorPoint::new("G25".parse().unwrap(), 105.0),
-            TenorPoint::new("1Q25".parse().unwrap(), 103.33),
+            TenorPoint::new(t("F25"), 100.0),
+            TenorPoint::new(t("G25"), 105.0),
+            TenorPoint::new(t("1Q25"), 103.33),
         ];
-
-        let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
-                .unwrap();
-
-        assert_eq!(interpolated.len(), 1);
-        assert_eq!(interpolated[0], "H25".parse::<Tenor>().unwrap());
-
-        // Find the interpolated point
-        let h25 = curve
-            .iter()
-            .find(|p| p.tenor == "H25".parse().unwrap())
-            .unwrap();
-        // 3 * 103.33 - 100 - 105 = 104.99
-        assert!((h25.value - 104.99).abs() < 0.01);
+        let added =
+            interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new).unwrap();
+        assert_eq!(added, [t("H25")]);
+        assert!(near(value(&curve, "H25"), 3.0 * 103.33 - 205.0));
     }
 
     #[test]
-    fn test_interpolate_multiple_missing_months() {
-        // 1Q25=100, only F25=90 given → G25 and H25 should each be 105
+    fn multiple_missing_months_share_the_residual() {
         let mut curve = vec![
-            TenorPoint::new("F25".parse().unwrap(), 90.0),
-            TenorPoint::new("1Q25".parse().unwrap(), 100.0),
+            TenorPoint::new(t("F25"), 90.0),
+            TenorPoint::new(t("1Q25"), 100.0),
         ];
-
-        let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
-                .unwrap();
-
-        assert_eq!(interpolated.len(), 2);
-
-        // Both G25 and H25 should have value 105 (3*100 - 90 = 210, 210/2 = 105)
-        let g25 = curve
-            .iter()
-            .find(|p| p.tenor == "G25".parse().unwrap())
-            .unwrap();
-        let h25 = curve
-            .iter()
-            .find(|p| p.tenor == "H25".parse().unwrap())
-            .unwrap();
-
-        assert!((g25.value - 105.0).abs() < 0.01);
-        assert!((h25.value - 105.0).abs() < 0.01);
+        let added =
+            interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new).unwrap();
+        assert_eq!(added.len(), 2);
+        assert!(near(value(&curve, "G25"), 105.0) && near(value(&curve, "H25"), 105.0));
     }
 
     #[test]
-    fn test_interpolate_all_missing_uses_constant() {
-        // 1Q25=100, no months given → all months should be 100 (constant interpolation)
-        let mut curve = vec![TenorPoint::new("1Q25".parse().unwrap(), 100.0)];
-
-        let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
-                .unwrap();
-
-        // All 3 months of Q1 should be interpolated
-        assert_eq!(interpolated.len(), 3);
-
-        // All should have the cover value (constant interpolation)
-        let f25 = curve
-            .iter()
-            .find(|p| p.tenor == "F25".parse().unwrap())
-            .unwrap();
-        let g25 = curve
-            .iter()
-            .find(|p| p.tenor == "G25".parse().unwrap())
-            .unwrap();
-        let h25 = curve
-            .iter()
-            .find(|p| p.tenor == "H25".parse().unwrap())
-            .unwrap();
-
-        assert!((f25.value - 100.0).abs() < 0.01);
-        assert!((g25.value - 100.0).abs() < 0.01);
-        assert!((h25.value - 100.0).abs() < 0.01);
+    fn all_missing_is_flat_at_the_cover() {
+        let mut curve = vec![TenorPoint::new(t("1Q25"), 100.0)];
+        let added =
+            interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new).unwrap();
+        assert_eq!(added.len(), 3);
+        assert!(
+            ["F25", "G25", "H25"]
+                .iter()
+                .all(|m| near(value(&curve, m), 100.0))
+        );
     }
 
     #[test]
-    fn test_interpolate_nothing_to_do() {
-        // All months present, nothing to interpolate
+    fn nothing_to_do() {
         let mut curve = vec![
-            TenorPoint::new("F25".parse().unwrap(), 100.0),
-            TenorPoint::new("G25".parse().unwrap(), 105.0),
-            TenorPoint::new("H25".parse().unwrap(), 110.0),
-            TenorPoint::new("1Q25".parse().unwrap(), 105.0),
+            TenorPoint::new(t("F25"), 100.0),
+            TenorPoint::new(t("G25"), 105.0),
+            TenorPoint::new(t("H25"), 110.0),
+            TenorPoint::new(t("1Q25"), 105.0),
         ];
-
-        let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
-                .unwrap();
-
-        assert!(interpolated.is_empty());
+        assert!(
+            interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
-    fn test_validate_consistent_curve() {
-        // Curve where quarter equals average of months
-        let curve = vec![
-            TenorPoint::new("F25".parse().unwrap(), 100.0),
-            TenorPoint::new("G25".parse().unwrap(), 105.0),
-            TenorPoint::new("H25".parse().unwrap(), 110.0),
-            TenorPoint::new("1Q25".parse().unwrap(), 105.0), // (100+105+110)/3 = 105
+    fn year_to_quarters_and_half_year_to_months() {
+        let mut curve = vec![
+            TenorPoint::new(t("1Q25"), 90.0),
+            TenorPoint::new(t("2Q25"), 95.0),
+            TenorPoint::new(t("Cal25"), 100.0),
         ];
+        let added =
+            interpolate_from_covers(&mut curve, TenorType::Quarter, 1e-9, TenorPoint::new).unwrap();
+        assert_eq!(added.len(), 2);
+        assert!(near(value(&curve, "3Q25"), 107.5) && near(value(&curve, "4Q25"), 107.5));
 
-        let result = validate_curve(&curve, TenorType::Month, 0.01);
-        assert!(result.is_ok());
+        let mut curve = vec![
+            TenorPoint::new(t("F25"), 90.0),
+            TenorPoint::new(t("G25"), 95.0),
+            TenorPoint::new(t("H25"), 100.0),
+            TenorPoint::new(t("J25"), 105.0),
+            TenorPoint::new(t("K25"), 110.0),
+            TenorPoint::new(t("1H25"), 100.0),
+        ];
+        let added =
+            interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new).unwrap();
+        assert_eq!(added, [t("M25")]);
+        assert!(near(value(&curve, "M25"), 100.0));
+    }
+
+    /// The case from the 2026-09 review: the same six points gave a different,
+    /// self-contradicting curve when the yearly cover came first.
+    #[test]
+    fn nested_covers_are_order_independent() {
+        let points = [
+            ("F25", 100.0),
+            ("G25", 101.0),
+            ("H25", 102.0),
+            ("2Q25", 104.0),
+            ("2H25", 110.0),
+            ("Cal25", 106.25),
+        ];
+        let mut results = Vec::new();
+        for order in [[0, 1, 2, 3, 4, 5], [5, 4, 3, 2, 1, 0], [3, 5, 0, 4, 2, 1]] {
+            let mut curve: Vec<TenorPoint> = order
+                .iter()
+                .map(|&i| TenorPoint::new(t(points[i].0), points[i].1))
+                .collect();
+            interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new).unwrap();
+            curve.sort_by(|a, b| a.tenor.cmp_by_granularity(&b.tenor));
+            assert!(validate_curve(&curve, TenorType::Month, 1e-9).is_ok());
+            results.push(
+                curve
+                    .iter()
+                    .map(|p| (p.tenor, (p.value * 1e6).round()))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0], results[2]);
+        let curve: Vec<TenorPoint> = results[0]
+            .iter()
+            .map(|&(tn, v)| TenorPoint::new(tn, v / 1e6))
+            .collect();
+        assert!(
+            ["J25", "K25", "M25"]
+                .iter()
+                .all(|m| near(value(&curve, m), 104.0))
+        );
+        assert!(
+            ["N25", "Q25", "U25", "V25", "X25", "Z25"]
+                .iter()
+                .all(|m| near(value(&curve, m), 110.0))
+        );
     }
 
     #[test]
-    fn test_validate_inconsistent_curve() {
-        // Curve where quarter doesn't match average of months
-        let curve = vec![
-            TenorPoint::new("F25".parse().unwrap(), 100.0),
-            TenorPoint::new("G25".parse().unwrap(), 105.0),
-            TenorPoint::new("H25".parse().unwrap(), 110.0),
-            TenorPoint::new("1Q25".parse().unwrap(), 120.0), // Wrong! Should be 105
+    fn contradictory_covers_are_an_error() {
+        let mut curve = vec![
+            TenorPoint::new(t("1Q25"), 100.0),
+            TenorPoint::new(t("2Q25"), 100.0),
+            TenorPoint::new(t("3Q25"), 100.0),
+            TenorPoint::new(t("4Q25"), 100.0),
+            TenorPoint::new(t("Cal25"), 120.0),
         ];
+        let err = interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new)
+            .unwrap_err();
+        assert!(
+            matches!(err, InterpolationError::InconsistentCurve { cover, cover_value, partition_avg } if cover == t("Cal25") && cover_value == 120.0 && near(partition_avg, 100.0))
+        );
+        // the quarters were filled before the contradiction was detected
+        assert_eq!(curve.len(), 5 + 12);
+    }
 
-        let result = validate_curve(&curve, TenorType::Month, 0.01);
+    #[test]
+    fn validate_consistent_inconsistent_and_incomplete() {
+        let consistent = vec![
+            TenorPoint::new(t("F25"), 100.0),
+            TenorPoint::new(t("G25"), 105.0),
+            TenorPoint::new(t("H25"), 110.0),
+            TenorPoint::new(t("1Q25"), 105.0),
+        ];
+        assert!(validate_curve(&consistent, TenorType::Month, 0.01).is_ok());
+        let mut inconsistent = consistent.clone();
+        inconsistent[3].value = 120.0;
         assert!(matches!(
-            result,
+            validate_curve(&inconsistent, TenorType::Month, 0.01),
             Err(InterpolationError::InconsistentCurve { .. })
         ));
+        let incomplete = vec![
+            TenorPoint::new(t("F25"), 100.0),
+            TenorPoint::new(t("1Q25"), 120.0),
+        ];
+        assert!(validate_curve(&incomplete, TenorType::Month, 0.01).is_ok());
     }
 
     #[test]
-    fn test_validate_skips_incomplete_partitions() {
-        // Curve with missing months - validation should pass (skip)
-        let curve = vec![
-            TenorPoint::new("F25".parse().unwrap(), 100.0),
-            TenorPoint::new("G25".parse().unwrap(), 105.0),
-            // H25 missing
-            TenorPoint::new("1Q25".parse().unwrap(), 120.0),
+    fn custom_tenor_value_type() {
+        #[derive(Clone)]
+        struct Row {
+            tenor: Tenor,
+            price: f64,
+            label: &'static str,
+        }
+        impl TenorValue for Row {
+            fn tenor(&self) -> Tenor {
+                self.tenor
+            }
+            fn value(&self) -> f64 {
+                self.price
+            }
+            fn set_value(&mut self, value: f64) {
+                self.price = value;
+            }
+        }
+        let mut rows = vec![
+            Row {
+                tenor: t("F25"),
+                price: 90.0,
+                label: "quoted",
+            },
+            Row {
+                tenor: t("1Q25"),
+                price: 100.0,
+                label: "quoted",
+            },
         ];
-
-        let result = validate_curve(&curve, TenorType::Month, 0.01);
-        assert!(result.is_ok()); // Skips validation because partition incomplete
-    }
-
-    #[test]
-    fn test_interpolate_year_to_quarters() {
-        // Cal25=100, 1Q25=90, 2Q25=95 → 3Q25 and 4Q25 should be 107.5 each
-        let mut curve = vec![
-            TenorPoint::new("1Q25".parse().unwrap(), 90.0),
-            TenorPoint::new("2Q25".parse().unwrap(), 95.0),
-            TenorPoint::new("Cal25".parse().unwrap(), 100.0),
-        ];
-
-        let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Quarter, TenorPoint::new)
-                .unwrap();
-
-        assert_eq!(interpolated.len(), 2);
-
-        // 4 * 100 - 90 - 95 = 215, 215/2 = 107.5
-        let q3 = curve
-            .iter()
-            .find(|p| p.tenor == "3Q25".parse().unwrap())
+        let added =
+            interpolate_from_covers(&mut rows, TenorType::Month, 1e-9, |tenor, price| Row {
+                tenor,
+                price,
+                label: "derived",
+            })
             .unwrap();
-        let q4 = curve
-            .iter()
-            .find(|p| p.tenor == "4Q25".parse().unwrap())
-            .unwrap();
-
-        assert!((q3.value - 107.5).abs() < 0.01);
-        assert!((q4.value - 107.5).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_interpolate_halfyear_to_months() {
-        // 1H25=100, F25=90, G25=95, H25=100, J25=105, K25=110 → M25 should be 100
-        let mut curve = vec![
-            TenorPoint::new("F25".parse().unwrap(), 90.0),
-            TenorPoint::new("G25".parse().unwrap(), 95.0),
-            TenorPoint::new("H25".parse().unwrap(), 100.0),
-            TenorPoint::new("J25".parse().unwrap(), 105.0),
-            TenorPoint::new("K25".parse().unwrap(), 110.0),
-            TenorPoint::new("1H25".parse().unwrap(), 100.0),
-        ];
-
-        let interpolated =
-            interpolate_from_covers(&mut curve, TenorType::Month, TenorPoint::new)
-                .unwrap();
-
-        assert_eq!(interpolated.len(), 1);
-
-        // 6 * 100 - (90+95+100+105+110) = 600 - 500 = 100
-        let m25 = curve
-            .iter()
-            .find(|p| p.tenor == "M25".parse().unwrap())
-            .unwrap();
-        assert!((m25.value - 100.0).abs() < 0.01);
+        assert_eq!(added.len(), 2);
+        assert_eq!(rows.iter().filter(|r| r.label == "derived").count(), 2);
+        rows[0].set_value(1.0);
+        assert_eq!(rows[0].value(), 1.0);
     }
 }
