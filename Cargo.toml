@@ -9,7 +9,7 @@ repository = "https://git.sr.ht/~danprobst/tenors"
 readme = "README.md"
 keywords = ["finance", "tenor", "futures", "trading"]
 categories = ["finance", "date-and-time"]
-exclude = ["CLAUDE.md", "tenors_interpolation.md"]
+exclude = ["CLAUDE.md", "tenors_interpolation.md", "CODE_REVIEW*.md"]
 
 [dependencies]
 chrono = "0.4"
