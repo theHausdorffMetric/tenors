@@ -12,6 +12,8 @@
 //! flat. Covers are processed finest-first, so the tightest constraint fills
 //! first and a coarser cover only distributes over what is still missing;
 //! covers that contradict each other are reported, never silently averaged.
+//! A failed call leaves the curve as it was, and NaN or infinite values are
+//! rejected instead of slipping through the consistency check.
 //!
 //! # Example
 //!
@@ -28,6 +30,7 @@
 //! assert_eq!(added.len(), 1); // H25
 //! ```
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use thiserror::Error;
@@ -49,6 +52,25 @@ pub enum InterpolationError {
         /// The average of its partition elements.
         partition_avg: f64,
     },
+    /// A value on the curve is NaN or infinite.
+    #[error("tenor {tenor} has a non-finite value {value}")]
+    NonFiniteValue {
+        /// The tenor carrying the value.
+        tenor: Tenor,
+        /// The value.
+        value: f64,
+    },
+}
+
+/// The first point whose value is NaN or infinite, as an error.
+fn check_finite<T: TenorValue>(curve: &[T]) -> Result<(), InterpolationError> {
+    match curve.iter().find(|p| !p.value().is_finite()) {
+        Some(p) => Err(InterpolationError::NonFiniteValue {
+            tenor: p.tenor(),
+            value: p.value(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Something that pairs a tenor with a value.
@@ -100,16 +122,27 @@ impl TenorValue for TenorPoint {
 /// After filling, every cover whose partition is complete is checked; a cover
 /// whose value differs from its partition's average by more than `tolerance`
 /// makes the call fail with [`InterpolationError::InconsistentCurve`] —
-/// contradictory covers are an error, not a silently averaged curve. The
-/// curve is left with the points added so far.
+/// contradictory covers are an error, not a silently averaged curve.
 ///
 /// Returns the tenors that were added.
+///
+/// # Errors
+///
+/// * [`InterpolationError::NonFiniteValue`] if any value on the curve is NaN
+///   or infinite (checked before anything is added);
+/// * [`InterpolationError::InconsistentCurve`] if the covers contradict each
+///   other or the points already on the curve.
+///
+/// On error the curve is left exactly as it was passed in: every point added
+/// by this call is removed again.
 pub fn interpolate_from_covers<T: TenorValue>(
     curve: &mut Vec<T>,
     target_type: TenorType,
     tolerance: f64,
     create_point: impl Fn(Tenor, f64) -> T,
 ) -> Result<Vec<Tenor>, InterpolationError> {
+    check_finite(curve)?;
+    let original_len = curve.len();
     let mut index: HashMap<Tenor, usize> = curve
         .iter()
         .enumerate()
@@ -154,18 +187,30 @@ pub fn interpolate_from_covers<T: TenorValue>(
         }
     }
 
-    validate_curve(curve, target_type, tolerance)?;
+    if let Err(e) = validate_curve(curve, target_type, tolerance) {
+        // only pushes happened, so truncating restores the input
+        curve.truncate(original_len);
+        return Err(e);
+    }
     Ok(added)
 }
 
 /// Check every cover whose partition at `target_type` is complete: its value
 /// must equal the partition's average within `tolerance`. Covers with missing
 /// partition elements are skipped.
+///
+/// # Errors
+///
+/// [`InterpolationError::NonFiniteValue`] if any value on the curve is NaN or
+/// infinite, [`InterpolationError::InconsistentCurve`] for the first cover
+/// that does not match its partition. A NaN `tolerance` matches nothing, so
+/// any complete cover is then inconsistent.
 pub fn validate_curve<T: TenorValue>(
     curve: &[T],
     target_type: TenorType,
     tolerance: f64,
 ) -> Result<(), InterpolationError> {
+    check_finite(curve)?;
     let values: HashMap<Tenor, f64> = curve.iter().map(|p| (p.tenor(), p.value())).collect();
     for point in curve {
         let cover = point.tenor();
@@ -183,7 +228,14 @@ pub fn validate_curve<T: TenorValue>(
             continue;
         }
         let partition_avg = found.iter().sum::<f64>() / found.len() as f64;
-        if (partition_avg - point.value()).abs() > tolerance {
+        // a NaN tolerance compares as None: a mismatch, not a pass
+        let within = matches!(
+            (partition_avg - point.value())
+                .abs()
+                .partial_cmp(&tolerance),
+            Some(Ordering::Less | Ordering::Equal)
+        );
+        if !within {
             return Err(InterpolationError::InconsistentCurve {
                 cover,
                 cover_value: point.value(),
@@ -351,8 +403,80 @@ mod tests {
         assert!(
             matches!(err, InterpolationError::InconsistentCurve { cover, cover_value, partition_avg } if cover == t("Cal25") && cover_value == 120.0 && near(partition_avg, 100.0))
         );
-        // the quarters were filled before the contradiction was detected
-        assert_eq!(curve.len(), 5 + 12);
+        // the months filled before the contradiction was detected are removed again
+        assert_eq!(curve.len(), 5);
+        assert!(
+            curve
+                .iter()
+                .all(|p| p.tenor.tenor_type() == TenorType::Quarter || p.tenor == t("Cal25"))
+        );
+    }
+
+    #[test]
+    fn a_failed_call_leaves_the_curve_unchanged() {
+        let original = vec![
+            TenorPoint::new(t("F25"), 100.0),
+            TenorPoint::new(t("2Q25"), 104.0),
+            TenorPoint::new(t("1Q25"), 100.0),
+            // the quarters fill January to June averaging 102, not 110
+            TenorPoint::new(t("1H25"), 110.0),
+        ];
+        let mut curve = original.clone();
+        assert!(matches!(
+            interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new),
+            Err(InterpolationError::InconsistentCurve { .. })
+        ));
+        assert_eq!(curve, original);
+    }
+
+    #[test]
+    fn non_finite_values_are_rejected() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            // as a cover: NaN used to fill the months and pass validation
+            let original = vec![TenorPoint::new(t("1Q25"), bad)];
+            let mut curve = original.clone();
+            let err = interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new)
+                .unwrap_err();
+            assert!(
+                matches!(err, InterpolationError::NonFiniteValue { tenor, .. } if tenor == t("1Q25")),
+                "{bad}"
+            );
+            assert_eq!(curve.len(), 1, "{bad}");
+            // as a partition element, next to a finite cover
+            let curve = vec![
+                TenorPoint::new(t("F25"), 1.0),
+                TenorPoint::new(t("G25"), bad),
+                TenorPoint::new(t("H25"), 1.0),
+                TenorPoint::new(t("1Q25"), 1.0),
+            ];
+            assert!(
+                matches!(
+                    validate_curve(&curve, TenorType::Month, 1e-9),
+                    Err(InterpolationError::NonFiniteValue { tenor, .. }) if tenor == t("G25")
+                ),
+                "{bad}"
+            );
+        }
+        // the error message names the tenor and the value
+        let mut curve = vec![TenorPoint::new(t("1Q25"), f64::NAN)];
+        let err = interpolate_from_covers(&mut curve, TenorType::Month, 1e-9, TenorPoint::new)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("tenor {} has a non-finite value NaN", t("1Q25"))
+        );
+    }
+
+    #[test]
+    fn nan_tolerance_rejects_every_complete_cover() {
+        let curve = vec![
+            TenorPoint::new(t("F25"), 100.0),
+            TenorPoint::new(t("G25"), 100.0),
+            TenorPoint::new(t("H25"), 100.0),
+            TenorPoint::new(t("1Q25"), 100.0),
+        ];
+        assert!(validate_curve(&curve, TenorType::Month, f64::NAN).is_err());
+        assert!(validate_curve(&curve, TenorType::Month, 0.0).is_ok());
     }
 
     #[test]

@@ -7,7 +7,10 @@ breaking changes bump the minor version.
 
 ## [Unreleased]
 
-Breaking: the date type, the serde output and the short-year rule change.
+## [0.3.0] - 2026-11-23
+
+Breaking: the date type, the serde output, the short-year rule and the
+interpolation error enum change.
 
 ### Fixed
 - **Parsing no longer panics on huge years.** `"F9223372036854775807"`,
@@ -20,6 +23,14 @@ Breaking: the date type, the serde output and the short-year rule change.
   wrapped silently in release; they now always panic with
   "tenor offset overflow". The `try_*` constructors return `None` on
   overflow.
+- **Interpolation rejects NaN and infinite values.** A NaN cover used to fill
+  its months with NaN and pass `validate_curve`, because `NaN > tolerance` is
+  false. `interpolate_from_covers` and `validate_curve` now return the new
+  `InterpolationError::NonFiniteValue { tenor, value }`, and a NaN
+  `tolerance` no longer passes every cover.
+- **A failed `interpolate_from_covers` leaves the curve unchanged.** It used
+  to return the error with the points it had added so far still on the
+  curve; they are now removed again.
 
 ### Changed
 - **`chrono` replaced by `jiff`** (1.0, no default features; chrono is
@@ -43,6 +54,12 @@ Breaking: the date type, the serde output and the short-year rule change.
 - The alternate form `{:#}` prints the full year and does not read the clock.
 - `Tenor::format_with_reference(year)`, the inverse of
   `parse_with_reference`.
+- `InterpolationError::NonFiniteValue`.
+
+### Packaging
+- CI on GitHub Actions: fmt, clippy, tests, examples, docs and
+  `cargo package` on stable; tests on the `rust-version` toolchain;
+  `cargo audit --deny warnings`; weekly as well as on pushes and PRs.
 
 ## [0.2.0] - 2026-09-13
 
@@ -117,6 +134,7 @@ format change.
 
 First release.
 
-[Unreleased]: https://github.com/theHausdorffMetric/tenors/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/theHausdorffMetric/tenors/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/theHausdorffMetric/tenors/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/theHausdorffMetric/tenors/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/theHausdorffMetric/tenors/releases/tag/v0.1.0
