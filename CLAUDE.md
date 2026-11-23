@@ -35,6 +35,12 @@ cargo run --example t1_general
 cargo run --example interpolation
 ```
 
+CI (`.github/workflows/ci.yml`) runs these on pushes to `master`, on pull
+requests and weekly: fmt, clippy, tests + examples + docs + `cargo package`
+on stable, tests on the `rust-version` toolchain, and `cargo audit --deny
+warnings`. `RUSTFLAGS`/`RUSTDOCFLAGS` are `-D warnings` and everything runs
+`--locked`, so commit `Cargo.lock` changes.
+
 ## Conventions
 
 - Rust edition 2024, `rust-version` tracks current stable.
