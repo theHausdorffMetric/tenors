@@ -7,6 +7,43 @@ breaking changes bump the minor version.
 
 ## [Unreleased]
 
+Breaking: the date type, the serde output and the short-year rule change.
+
+### Fixed
+- **Parsing no longer panics on huge years.** `"F9223372036854775807"`,
+  `"1Q9223372036854775807"` and the same strings through serde panicked with
+  "tenor offset overflow"; every parser now returns
+  `TenorsError::UnparsableTenorString`. `parse_with_reference` with a
+  reference at the edge of `isize` is an error too.
+- Plain constructors (`year_from_y(isize::MIN)`, `half_month_from_ymh0` with
+  a huge month) panicked with an arithmetic-overflow message in debug and
+  wrapped silently in release; they now always panic with
+  "tenor offset overflow". The `try_*` constructors return `None` on
+  overflow.
+
+### Changed
+- **`chrono` replaced by `jiff`** (1.0, no default features; chrono is
+  unmaintained, RUSTSEC-2026-0543). `first_day()` / `last_day()` return
+  `Option<jiff::civil::Date>` — `None` outside years -9999..=9999;
+  `half_month_from_date` takes a `jiff::civil::Date` by value and
+  `From<&impl Datelike>` is now `From<jiff::civil::Date>`.
+- **Serde writes the full year** (`"F2024"`, `"1Q2024"`, `"2HZ2099"`), so a
+  stored tenor no longer changes meaning when the century turns (a 0.2
+  `"F99"` written in 2099 read back as 2199 in 2100). Short-year strings
+  written by 0.2 still deserialize, against the current year.
+- **Short years use a sliding window** instead of the current century or
+  decade: two digits resolve to the matching year in
+  `reference - 50 ..= reference + 49`, one digit to
+  `reference - 1 ..= reference + 8`. In 2029 `F0` is 2030 (was 2020); in
+  2026 `F99` is 1999 (was 2099) and `F4` is 2034 (was 2024). `Display`
+  prints two digits exactly inside the two-digit window, so it stays the
+  inverse of `FromStr`.
+
+### Added
+- The alternate form `{:#}` prints the full year and does not read the clock.
+- `Tenor::format_with_reference(year)`, the inverse of
+  `parse_with_reference`.
+
 ## [0.2.0] - 2026-09-13
 
 Everything from the 2026-09 code review (`CODE_REVIEW-2026-09.md` in the

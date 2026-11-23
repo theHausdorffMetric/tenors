@@ -25,18 +25,30 @@
 //!
 //! # Notation
 //!
-//! | type      | prints as | also parses                                   |
-//! |-----------|-----------|-----------------------------------------------|
-//! | HalfMonth | `1HF24`   | `2HF2024`                                     |
-//! | Month     | `F24`     | `F7` (current decade), `F2024`                |
-//! | Quarter   | `1Q24`    | `24Q1`, `1Q2024`, `2024Q1`                    |
-//! | HalfYear  | `1H24`    | `24H1`, `1H2024`, `2024H1`                    |
-//! | Year      | `2024`    | `C24`, `Cal24`, `C2024`, `Cal2024`            |
+//! | type      | prints as | `{:#}` / serde | also parses                      |
+//! |-----------|-----------|----------------|----------------------------------|
+//! | HalfMonth | `1HF24`   | `1HF2024`      |                                  |
+//! | Month     | `F24`     | `F2024`        | `F7`                             |
+//! | Quarter   | `1Q24`    | `1Q2024`       | `24Q1`, `2024Q1`                 |
+//! | HalfYear  | `1H24`    | `1H2024`       | `24H1`, `2024H1`                 |
+//! | Year      | `2024`    | `2024`         | `C24`, `Cal24`, `C2024`, `Cal2024` |
 //!
-//! Two-digit years resolve against the current century and one-digit years
-//! (month codes only) against the current decade — the clock rule — unless
-//! you parse with [`Tenor::parse_with_reference`]. Tenors outside the current
-//! century print a four-digit year (`F1999`) so that every value round-trips.
+//! # Short years
+//!
+//! Short years resolve against a reference year — the current UTC year
+//! unless you use [`Tenor::parse_with_reference`] — through a sliding window:
+//!
+//! * two digits: the matching year in `reference - 50 ..= reference + 49`
+//!   (in 2026, `F99` is 1999 and `F75` is 2075);
+//! * one digit (month codes only): the matching year in
+//!   `reference - 1 ..= reference + 8` (in 2029, `F0` is 2030; in 2026, `Z5`
+//!   is 2025) — live and just-expired contracts.
+//!
+//! `Display` prints two digits exactly when the year is inside the two-digit
+//! window of the current year, four otherwise (`F1950`), so `to_string` and
+//! `parse` are inverses at any given time. The alternate form `{:#}` and the
+//! serde representation always print the full year: a stored tenor never
+//! changes meaning as the clock moves on.
 //!
 //! Half-months split the way Platts' half-month cycles do: the 1st to the
 //! 15th is the first half, the 16th to the end of the month the second.
@@ -45,7 +57,7 @@
 
 pub mod interpolation;
 
-use chrono::{Datelike, NaiveDate};
+use jiff::civil::Date;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::ops::{Add, AddAssign, Mul, Sub, SubAssign};
@@ -160,75 +172,97 @@ impl Tenor {
     }
 
     /// The offset of `year` from the epoch in units of `ty`, plus `part`;
-    /// out-of-range parts carry.
-    fn from_parts(ty: TenorType, year: isize, part: isize) -> Tenor {
-        let offset = (year - TENOR_EPOCH)
-            .checked_mul(ty.per_year())
-            .and_then(|o| o.checked_add(part))
-            .expect("tenor offset overflow");
-        Tenor::new(ty, offset)
+    /// out-of-range parts carry. `None` if the offset overflows `isize`.
+    fn from_parts(ty: TenorType, year: isize, part: isize) -> Option<Tenor> {
+        let offset = year
+            .checked_sub(TENOR_EPOCH)?
+            .checked_mul(ty.per_year())?
+            .checked_add(part)?;
+        Some(Tenor::new(ty, offset))
+    }
+
+    /// [`Tenor::from_parts`] for the infallible constructors.
+    fn from_parts_or_panic(ty: TenorType, year: isize, part: isize) -> Tenor {
+        Tenor::from_parts(ty, year, part).expect("tenor offset overflow")
     }
 
     /// The calendar year `year`.
+    ///
+    /// Panics if the offset overflows `isize`, like every plain constructor;
+    /// the `try_*` constructors and the parsers return `None` / `Err` instead.
     pub fn year_from_y(year: isize) -> Tenor {
-        Tenor::from_parts(TenorType::Year, year, 0)
+        Tenor::from_parts_or_panic(TenorType::Year, year, 0)
     }
 
     /// Half-year `half0` (0 or 1) of `year`; other values carry.
     pub fn half_year_from_yh0(year: isize, half0: isize) -> Tenor {
-        Tenor::from_parts(TenorType::HalfYear, year, half0)
+        Tenor::from_parts_or_panic(TenorType::HalfYear, year, half0)
     }
 
     /// Quarter `quarter0` (0–3) of `year`; other values carry, so
     /// `quarter_from_yq0(2024, 4)` is the first quarter of 2025.
     pub fn quarter_from_yq0(year: isize, quarter0: isize) -> Tenor {
-        Tenor::from_parts(TenorType::Quarter, year, quarter0)
+        Tenor::from_parts_or_panic(TenorType::Quarter, year, quarter0)
     }
 
     /// Month `month0` (0 = January … 11 = December) of `year`; other values
     /// carry, so `month_from_ym0(2024, 12)` is January 2025.
     pub fn month_from_ym0(year: isize, month0: isize) -> Tenor {
-        Tenor::from_parts(TenorType::Month, year, month0)
+        Tenor::from_parts_or_panic(TenorType::Month, year, month0)
     }
 
     /// Half-month `half0` (0 = 1st–15th, 1 = 16th–end) of month `month0` of
     /// `year`; out-of-range values carry.
     pub fn half_month_from_ymh0(year: isize, month0: isize, half0: isize) -> Tenor {
-        Tenor::from_parts(TenorType::HalfMonth, year, month0 * 2 + half0)
+        let part = month0
+            .checked_mul(2)
+            .and_then(|p| p.checked_add(half0))
+            .expect("tenor offset overflow");
+        Tenor::from_parts_or_panic(TenorType::HalfMonth, year, part)
     }
 
-    /// Like [`Tenor::half_year_from_yh0`], but `None` unless `half0` is 0 or 1.
+    /// Like [`Tenor::half_year_from_yh0`], but `None` unless `half0` is 0 or
+    /// 1, or if the offset overflows.
     pub fn try_half_year_from_yh0(year: isize, half0: isize) -> Option<Tenor> {
-        (0..2)
-            .contains(&half0)
-            .then(|| Tenor::half_year_from_yh0(year, half0))
+        if !(0..2).contains(&half0) {
+            return None;
+        }
+        Tenor::from_parts(TenorType::HalfYear, year, half0)
     }
 
-    /// Like [`Tenor::quarter_from_yq0`], but `None` unless `quarter0` is 0–3.
+    /// Like [`Tenor::quarter_from_yq0`], but `None` unless `quarter0` is 0–3,
+    /// or if the offset overflows.
     pub fn try_quarter_from_yq0(year: isize, quarter0: isize) -> Option<Tenor> {
-        (0..4)
-            .contains(&quarter0)
-            .then(|| Tenor::quarter_from_yq0(year, quarter0))
+        if !(0..4).contains(&quarter0) {
+            return None;
+        }
+        Tenor::from_parts(TenorType::Quarter, year, quarter0)
     }
 
-    /// Like [`Tenor::month_from_ym0`], but `None` unless `month0` is 0–11.
+    /// Like [`Tenor::month_from_ym0`], but `None` unless `month0` is 0–11, or
+    /// if the offset overflows.
     pub fn try_month_from_ym0(year: isize, month0: isize) -> Option<Tenor> {
-        (0..12)
-            .contains(&month0)
-            .then(|| Tenor::month_from_ym0(year, month0))
+        if !(0..12).contains(&month0) {
+            return None;
+        }
+        Tenor::from_parts(TenorType::Month, year, month0)
     }
 
     /// The half-month containing a date: the 1st–15th is the first half,
     /// the 16th onwards the second.
-    pub fn half_month_from_date<T: Datelike>(date: &T) -> Tenor {
+    pub fn half_month_from_date(date: Date) -> Tenor {
         let half0 = if date.day() > 15 { 1 } else { 0 };
-        Tenor::half_month_from_ymh0(date.year() as isize, date.month0() as isize, half0)
+        Tenor::half_month_from_ymh0(
+            isize::from(date.year()),
+            isize::from(date.month()) - 1,
+            half0,
+        )
     }
 }
 
-impl<T: Datelike> From<&T> for Tenor {
+impl From<Date> for Tenor {
     /// The half-month containing the date; see [`Tenor::half_month_from_date`].
-    fn from(date: &T) -> Tenor {
+    fn from(date: Date) -> Tenor {
         Tenor::half_month_from_date(date)
     }
 }
@@ -373,31 +407,30 @@ impl Tenor {
         Some((0..ratio).map(|i| Tenor::new(target, base + i)).collect())
     }
 
-    /// The first calendar day of the tenor; `None` only if the year is outside chrono's range.
-    pub fn first_day(&self) -> Option<NaiveDate> {
+    /// The first calendar day of the tenor; `None` only if the year is outside
+    /// jiff's range (-9999 to 9999).
+    pub fn first_day(&self) -> Option<Date> {
         let hm = self.partition(TenorType::HalfMonth)?[0];
         let (year, month) = hm.calendar_year_month()?;
-        NaiveDate::from_ymd_opt(year, month, if hm.half0() == Some(0) { 1 } else { 16 })
+        Date::new(year, month, if hm.half0() == Some(0) { 1 } else { 16 }).ok()
     }
 
-    /// The last calendar day of the tenor; `None` only if the year is outside chrono's range.
-    pub fn last_day(&self) -> Option<NaiveDate> {
+    /// The last calendar day of the tenor; `None` only if the year is outside
+    /// jiff's range (-9999 to 9999).
+    pub fn last_day(&self) -> Option<Date> {
         let hm = *self.partition(TenorType::HalfMonth)?.last()?;
         let (year, month) = hm.calendar_year_month()?;
         if hm.half0() == Some(0) {
-            NaiveDate::from_ymd_opt(year, month, 15)
+            Date::new(year, month, 15).ok()
         } else {
-            // the day before the 1st of the next month
-            let next = hm.cover(TenorType::Month)?.checked_add(1)?;
-            let (ny, nm) = next.calendar_year_month()?;
-            NaiveDate::from_ymd_opt(ny, nm, 1)?.pred_opt()
+            Some(Date::new(year, month, 1).ok()?.last_of_month())
         }
     }
 
-    /// (year, 1-based month) as chrono wants them; `None` if the year does not fit an `i32`.
-    fn calendar_year_month(&self) -> Option<(i32, u32)> {
-        let year = i32::try_from(self.year()).ok()?;
-        let month = self.month0()? as u32 + 1;
+    /// (year, 1-based month) as jiff wants them; `None` if the year does not fit an `i16`.
+    fn calendar_year_month(&self) -> Option<(i16, i8)> {
+        let year = i16::try_from(self.year()).ok()?;
+        let month = i8::try_from(self.month0()? + 1).ok()?;
         Some((year, month))
     }
 }
@@ -550,64 +583,131 @@ impl Mul<isize> for TenorDuration {
 // text: Display, FromStr, the other parsers, serde
 // ---------------------------------------------------------------------------
 
-/// The calendar year the clock rule resolves short years against.
+/// The calendar year (UTC) short years resolve against when no reference is given.
 pub fn current_reference_year() -> isize {
-    chrono::Utc::now().year() as isize
+    let now = jiff::tz::TimeZone::UTC.to_datetime(jiff::Timestamp::now());
+    isize::from(now.year())
 }
 
-/// A year as the notation prints it: two digits inside the reference
-/// century, at least four digits otherwise (so `F0999` round-trips).
-fn format_year(year: isize, reference: isize) -> String {
-    if year.div_euclid(100) == reference.div_euclid(100) {
-        format!("{:02}", year.rem_euclid(100))
-    } else {
-        format!("{year:04}")
+/// A short-year window: years with `digits` digits resolve to the matching
+/// year in `reference - back ..= reference - back + 10^digits - 1`.
+#[derive(Clone, Copy)]
+struct YearWindow {
+    modulus: isize,
+    back: isize,
+}
+
+/// Two-digit years: `reference - 50 ..= reference + 49`.
+const TWO_DIGIT_YEARS: YearWindow = YearWindow {
+    modulus: 100,
+    back: 50,
+};
+
+/// One-digit years: `reference - 1 ..= reference + 8`.
+const ONE_DIGIT_YEARS: YearWindow = YearWindow {
+    modulus: 10,
+    back: 1,
+};
+
+impl YearWindow {
+    /// The year in the window around `reference` whose last digits are
+    /// `value` (`0 <= value < modulus`); `None` if the window overflows.
+    fn resolve(self, value: isize, reference: isize) -> Option<isize> {
+        let low = reference.checked_sub(self.back)?;
+        let step = (value - low.rem_euclid(self.modulus)).rem_euclid(self.modulus);
+        low.checked_add(step)
+    }
+
+    /// Whether `year` is inside the window around `reference`, i.e. its short
+    /// form resolves back to it.
+    fn contains(self, year: isize, reference: isize) -> bool {
+        self.resolve(year.rem_euclid(self.modulus), reference) == Some(year)
+    }
+}
+
+/// A year as the notation prints it: two digits inside the two-digit window
+/// of `reference`, at least four digits otherwise (so `F0999` round-trips) or
+/// when there is no reference.
+fn format_year(year: isize, reference: Option<isize>) -> String {
+    match reference {
+        Some(r) if TWO_DIGIT_YEARS.contains(year, r) => format!("{:02}", year.rem_euclid(100)),
+        _ => format!("{year:04}"),
+    }
+}
+
+impl Tenor {
+    /// Write the notation; short years relative to `reference`, full years if `None`.
+    fn write_to(
+        &self,
+        out: &mut impl std::fmt::Write,
+        reference: Option<isize>,
+    ) -> std::fmt::Result {
+        let year = format_year(self.year(), reference);
+        match self.tenor_type {
+            TenorType::HalfMonth => write!(
+                out,
+                "{}H{}{}",
+                self.half0().unwrap_or(0) + 1,
+                FUTURESCODES[self.month0().unwrap_or(0)],
+                year
+            ),
+            TenorType::Month => write!(out, "{}{}", FUTURESCODES[self.month0().unwrap_or(0)], year),
+            TenorType::Quarter => write!(out, "{}Q{}", self.quarter0().unwrap_or(0) + 1, year),
+            TenorType::HalfYear => write!(out, "{}H{}", self.half_year0().unwrap_or(0) + 1, year),
+            TenorType::Year => write!(out, "{:04}", self.year()),
+        }
+    }
+
+    /// The notation with short years relative to `reference` instead of the
+    /// clock; the inverse of [`Tenor::parse_with_reference`].
+    ///
+    /// ```
+    /// use tenors::Tenor;
+    /// let f1999 = Tenor::month_from_ym0(1999, 0);
+    /// assert_eq!(f1999.format_with_reference(2026), "F99");
+    /// assert_eq!(f1999.format_with_reference(2060), "F1999");
+    /// ```
+    pub fn format_with_reference(&self, reference: isize) -> String {
+        let mut s = String::new();
+        self.write_to(&mut s, Some(reference))
+            .expect("writing to a String cannot fail");
+        s
     }
 }
 
 impl std::fmt::Display for Tenor {
+    /// `{}` prints short years relative to the current year (`F24`); the
+    /// alternate form `{:#}` always prints the full year (`F2024`) and does
+    /// not depend on the clock.
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let year = format_year(self.year(), current_reference_year());
-        match self.tenor_type {
-            TenorType::HalfMonth => {
-                write!(
-                    f,
-                    "{}H{}{}",
-                    self.half0().unwrap_or(0) + 1,
-                    FUTURESCODES[self.month0().unwrap_or(0)],
-                    year
-                )
-            }
-            TenorType::Month => write!(f, "{}{}", FUTURESCODES[self.month0().unwrap_or(0)], year),
-            TenorType::Quarter => write!(f, "{}Q{}", self.quarter0().unwrap_or(0) + 1, year),
-            TenorType::HalfYear => write!(f, "{}H{}", self.half_year0().unwrap_or(0) + 1, year),
-            TenorType::Year => write!(f, "{:04}", self.year()),
-        }
+        let reference = (!f.alternate()).then(current_reference_year);
+        self.write_to(f, reference)
     }
 }
 
 impl FromStr for Tenor {
     type Err = TenorsError;
 
-    /// Parse any supported notation, resolving short years with the clock rule.
+    /// Parse any supported notation, resolving short years against the current year.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         parse_tenor(s, current_reference_year())
     }
 }
 
 impl Tenor {
-    /// Parse any supported notation, resolving two-digit years against
-    /// `reference`'s century and one-digit month codes against its decade.
+    /// Parse any supported notation, resolving short years against
+    /// `reference` instead of the clock (see the crate docs for the windows).
     ///
     /// ```
     /// use tenors::Tenor;
     /// assert_eq!(Tenor::parse_with_reference("F24", 1950).unwrap(), Tenor::month_from_ym0(1924, 0));
+    /// assert_eq!(Tenor::parse_with_reference("F0", 2029).unwrap(), Tenor::month_from_ym0(2030, 0));
     /// ```
     pub fn parse_with_reference(s: &str, reference: isize) -> Result<Tenor, TenorsError> {
         parse_tenor(s, reference)
     }
 
-    /// Parse a futures month code: `F24`, `F2024`, or `F7` (current decade).
+    /// Parse a futures month code: `F24`, `F2024`, or `F7`.
     pub fn month_from_futures_code(fc: &str) -> Result<Tenor, TenorsError> {
         let bad = || TenorsError::UnparsableTenorString(fc.to_string());
         if !fc.is_ascii() {
@@ -616,7 +716,7 @@ impl Tenor {
         let mut chars = fc.chars();
         let month0 = chars.next().and_then(futures_code_month0).ok_or_else(bad)?;
         let year = resolve_year(chars.as_str(), current_reference_year(), true).ok_or_else(bad)?;
-        Ok(Tenor::month_from_ym0(year, month0 as isize))
+        Tenor::from_parts(TenorType::Month, year, month0 as isize).ok_or_else(bad)
     }
 }
 
@@ -630,7 +730,7 @@ pub fn cme_tenor_parser(tenor_string: &str) -> Result<Tenor, TenorsError> {
     let year_digits = rest.strip_prefix(' ').ok_or_else(bad)?;
     let month0 = cme_month0(month).ok_or_else(bad)?;
     let year = resolve_year(year_digits, current_reference_year(), false).ok_or_else(bad)?;
-    Ok(Tenor::month_from_ym0(year, month0 as isize))
+    Tenor::from_parts(TenorType::Month, year, month0 as isize).ok_or_else(bad)
 }
 
 fn cme_month0(x: &str) -> Option<usize> {
@@ -643,31 +743,34 @@ fn cme_month0(x: &str) -> Option<usize> {
     months.iter().position(|m| m.eq_ignore_ascii_case(x))
 }
 
-/// Digits to a year: one digit → `reference`'s decade (if `allow_decade`),
-/// two → its century, four or more → literal. Three digits are an error.
-fn resolve_year(digits: &str, reference: isize, allow_decade: bool) -> Option<isize> {
+/// Digits to a year: one digit → [`ONE_DIGIT_YEARS`] (if `allow_one_digit`),
+/// two → [`TWO_DIGIT_YEARS`], four or more → literal. Three digits, and
+/// anything that does not fit an `isize`, are an error.
+fn resolve_year(digits: &str, reference: isize, allow_one_digit: bool) -> Option<isize> {
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let value: isize = digits.parse().ok()?;
     match digits.len() {
-        1 if allow_decade => Some(reference.div_euclid(10) * 10 + value),
+        1 if allow_one_digit => ONE_DIGIT_YEARS.resolve(value, reference),
         1 | 3 => None,
-        2 => Some(reference.div_euclid(100) * 100 + value),
+        2 => TWO_DIGIT_YEARS.resolve(value, reference),
         _ => Some(value),
     }
 }
 
-/// The one tokenizer behind every string entry point.
+/// The one tokenizer behind every string entry point. Never panics: an
+/// out-of-range year is an [`TenorsError::UnparsableTenorString`].
 fn parse_tenor(s: &str, reference: isize) -> Result<Tenor, TenorsError> {
     let bad = || TenorsError::UnparsableTenorString(s.to_string());
     if s.is_empty() || !s.is_ascii() {
         return Err(bad());
     }
     let b = s.as_bytes();
-    let year = |digits: &str, allow_decade: bool| {
-        resolve_year(digits, reference, allow_decade).ok_or_else(bad)
+    let year = |digits: &str, allow_one_digit: bool| {
+        resolve_year(digits, reference, allow_one_digit).ok_or_else(bad)
     };
+    let tenor = |ty, year, part| Tenor::from_parts(ty, year, part).ok_or_else(bad);
 
     // years: "C24", "Cal2024", or a bare year of at least four digits
     if let Some(rest) = s.strip_prefix('C') {
@@ -675,10 +778,10 @@ fn parse_tenor(s: &str, reference: isize) -> Result<Tenor, TenorsError> {
             Some(al) if al.eq_ignore_ascii_case("al") => &rest[2..],
             _ => rest,
         };
-        return Ok(Tenor::year_from_y(year(digits, false)?));
+        return tenor(TenorType::Year, year(digits, false)?, 0);
     }
     if b.len() >= 4 && b.iter().all(u8::is_ascii_digit) {
-        return Ok(Tenor::year_from_y(year(s, false)?));
+        return tenor(TenorType::Year, year(s, false)?, 0);
     }
 
     // half-months: "1HF24", "2HF2024" — a period digit, 'H', a month letter
@@ -688,16 +791,16 @@ fn parse_tenor(s: &str, reference: isize) -> Result<Tenor, TenorsError> {
         && let Some(month0) = futures_code_month0(b[2] as char)
     {
         let half0 = (b[0] - b'1') as isize;
-        return Ok(Tenor::half_month_from_ymh0(
+        return tenor(
+            TenorType::HalfMonth,
             year(&s[3..], false)?,
-            month0 as isize,
-            half0,
-        ));
+            month0 as isize * 2 + half0,
+        );
     }
 
     // month codes: "F7", "F24", "F2024"
     if let Some(month0) = futures_code_month0(b[0] as char) {
-        return Ok(Tenor::month_from_ym0(year(&s[1..], true)?, month0 as isize));
+        return tenor(TenorType::Month, year(&s[1..], true)?, month0 as isize);
     }
 
     // quarters and half-years, period-first ("1Q24") or year-first ("24Q1")
@@ -713,7 +816,7 @@ fn parse_tenor(s: &str, reference: isize) -> Result<Tenor, TenorsError> {
             if !(1..=count).contains(&period) {
                 return Err(bad());
             }
-            return Ok(Tenor::from_parts(ty, year(year_digits, false)?, period - 1));
+            return tenor(ty, year(year_digits, false)?, period - 1);
         }
     }
 
@@ -721,13 +824,16 @@ fn parse_tenor(s: &str, reference: isize) -> Result<Tenor, TenorsError> {
 }
 
 impl Serialize for Tenor {
-    /// The canonical string, e.g. `"F24"`.
+    /// The notation with the full year (`"F2024"`, `"1Q2024"`), independent
+    /// of the clock.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
+        serializer.collect_str(&format_args!("{self:#}"))
     }
 }
 
 impl<'de> Deserialize<'de> for Tenor {
+    /// Any notation [`FromStr`] accepts. Short years (as written by 0.2)
+    /// still resolve against the current year.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(serde::de::Error::custom)
@@ -742,17 +848,23 @@ impl<'de> Deserialize<'de> for Tenor {
 mod tests {
     use super::*;
 
-    fn century() -> isize {
-        current_reference_year().div_euclid(100) * 100
+    /// The year a two-digit year resolves to today, by the same window rule.
+    fn yy(n: isize) -> isize {
+        TWO_DIGIT_YEARS
+            .resolve(n, current_reference_year())
+            .unwrap()
     }
-    fn decade() -> isize {
-        current_reference_year().div_euclid(10) * 10
+    /// The year a one-digit year resolves to today.
+    fn y1(n: isize) -> isize {
+        ONE_DIGIT_YEARS
+            .resolve(n, current_reference_year())
+            .unwrap()
     }
     fn t(s: &str) -> Tenor {
         s.parse().unwrap_or_else(|e| panic!("{s}: {e}"))
     }
-    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    fn date(y: i16, m: i8, d: i8) -> Date {
+        Date::new(y, m, d).unwrap()
     }
 
     // --- model ---------------------------------------------------------------
@@ -985,28 +1097,28 @@ mod tests {
         for (y, m, last) in [(2024, 2, 29), (2023, 2, 28), (2024, 4, 30), (2024, 3, 31)] {
             let h1 = Tenor::half_month_from_ymh0(y as isize, m as isize - 1, 0);
             let h2 = Tenor::half_month_from_ymh0(y as isize, m as isize - 1, 1);
-            assert_eq!(Tenor::from(&date(y, m, 14)), h1);
-            assert_eq!(Tenor::from(&date(y, m, 15)), h1);
-            assert_eq!(Tenor::from(&date(y, m, 16)), h2);
-            assert_eq!(Tenor::from(&date(y, m, last)), h2);
+            assert_eq!(Tenor::from(date(y, m, 14)), h1);
+            assert_eq!(Tenor::from(date(y, m, 15)), h1);
+            assert_eq!(Tenor::from(date(y, m, 16)), h2);
+            assert_eq!(Tenor::from(date(y, m, last)), h2);
             assert_eq!(h1.last_day(), Some(date(y, m, 15)));
             assert_eq!(h2.first_day(), Some(date(y, m, 16)));
             assert_eq!(h2.last_day(), Some(date(y, m, last)));
         }
         assert_eq!(
-            Tenor::from(&date(1970, 1, 4)),
+            Tenor::from(date(1970, 1, 4)),
             Tenor::new(TenorType::HalfMonth, 0)
         );
         assert_eq!(
-            Tenor::from(&date(1970, 1, 15)),
+            Tenor::from(date(1970, 1, 15)),
             Tenor::new(TenorType::HalfMonth, 0)
         );
         assert_eq!(
-            Tenor::from(&date(1970, 1, 16)),
+            Tenor::from(date(1970, 1, 16)),
             Tenor::new(TenorType::HalfMonth, 1)
         );
         assert_eq!(
-            Tenor::half_month_from_date(&date(1969, 12, 31)),
+            Tenor::half_month_from_date(date(1969, 12, 31)),
             Tenor::new(TenorType::HalfMonth, -1)
         );
     }
@@ -1111,42 +1223,176 @@ mod tests {
 
     #[test]
     fn display_every_type() {
-        let c = century();
+        let f = |t: Tenor| t.format_with_reference(2026);
+        assert_eq!(f(Tenor::half_month_from_ymh0(2020, 0, 0)), "1HF20");
+        assert_eq!(f(Tenor::half_month_from_ymh0(2020, 0, 1)), "2HF20");
+        assert_eq!(f(Tenor::month_from_ym0(2024, 0)), "F24");
+        assert_eq!(f(Tenor::month_from_ym0(2024, 11)), "Z24");
+        assert_eq!(f(Tenor::month_from_ym0(2003, 7)), "Q03");
+        assert_eq!(f(Tenor::quarter_from_yq0(2024, 0)), "1Q24");
+        assert_eq!(f(Tenor::half_year_from_yh0(2024, 1)), "2H24");
+        assert_eq!(f(Tenor::year_from_y(2024)), "2024");
+        // the two-digit window in 2026 is 1976..=2075
+        assert_eq!(f(Tenor::month_from_ym0(1976, 0)), "F76");
+        assert_eq!(f(Tenor::month_from_ym0(1975, 0)), "F1975");
+        assert_eq!(f(Tenor::month_from_ym0(2075, 0)), "F75");
+        assert_eq!(f(Tenor::month_from_ym0(2076, 0)), "F2076");
+        assert_eq!(f(Tenor::month_from_ym0(1999, 0)), "F99");
+        // outside the window: the full year, zero-padded to four digits
+        assert_eq!(f(Tenor::year_from_y(999)), "0999");
+        assert_eq!(f(Tenor::month_from_ym0(1, 0)), "F0001");
+        assert_eq!(f(Tenor::quarter_from_yq0(1969, 3)), "4Q1969");
+        assert_eq!(f(Tenor::half_month_from_ymh0(2200, 5, 1)), "2HM2200");
+        // Display uses the same rule against the clock
+        assert_eq!(Tenor::month_from_ym0(yy(24), 0).to_string(), "F24");
+        assert_eq!(Tenor::half_year_from_yh0(yy(99), 1).to_string(), "2H99");
+    }
+
+    #[test]
+    fn alternate_display_always_prints_the_full_year() {
         assert_eq!(
-            Tenor::half_month_from_ymh0(c + 20, 0, 0).to_string(),
-            "1HF20"
+            format!("{:#}", Tenor::half_month_from_ymh0(2024, 0, 1)),
+            "2HF2024"
         );
+        assert_eq!(format!("{:#}", Tenor::month_from_ym0(2024, 0)), "F2024");
+        assert_eq!(format!("{:#}", Tenor::month_from_ym0(999, 0)), "F0999");
+        assert_eq!(format!("{:#}", Tenor::quarter_from_yq0(2099, 3)), "4Q2099");
         assert_eq!(
-            Tenor::half_month_from_ymh0(c + 20, 0, 1).to_string(),
-            "2HF20"
+            format!("{:#}", Tenor::half_year_from_yh0(1999, 0)),
+            "1H1999"
         );
-        assert_eq!(Tenor::month_from_ym0(c + 24, 0).to_string(), "F24");
-        assert_eq!(Tenor::month_from_ym0(c + 24, 11).to_string(), "Z24");
-        assert_eq!(Tenor::month_from_ym0(c + 3, 7).to_string(), "Q03");
-        assert_eq!(Tenor::quarter_from_yq0(c + 24, 0).to_string(), "1Q24");
-        assert_eq!(Tenor::half_year_from_yh0(c + 24, 1).to_string(), "2H24");
+        assert_eq!(format!("{:#}", Tenor::year_from_y(2024)), "2024");
+    }
+
+    #[test]
+    fn short_years_use_a_sliding_window() {
+        let p = |s: &str, r: isize| Tenor::parse_with_reference(s, r).unwrap().year();
+        // two digits: reference - 50 ..= reference + 49
+        assert_eq!(p("F99", 2026), 1999);
+        assert_eq!(p("F76", 2026), 1976);
+        assert_eq!(p("F75", 2026), 2075);
+        assert_eq!(p("F26", 2026), 2026);
+        assert_eq!(p("F00", 2099), 2100);
+        assert_eq!(p("F48", 2099), 2148);
+        assert_eq!(p("F49", 2099), 2049);
+        assert_eq!(p("F50", 2099), 2050);
+        assert_eq!(p("1Q00", 2099), 2100);
+        assert_eq!(p("C00", 2099), 2100);
+        // one digit: reference - 1 ..= reference + 8
+        assert_eq!(p("F0", 2029), 2030);
+        assert_eq!(p("F8", 2029), 2028);
+        assert_eq!(p("F7", 2029), 2037);
+        assert_eq!(p("Z5", 2026), 2025);
+        assert_eq!(p("F6", 2026), 2026);
+        assert_eq!(p("F4", 2026), 2034);
+        assert_eq!(p("F9", 2000), 1999);
+        assert_eq!(p("F8", 2000), 2008);
+        // before year 0
+        assert_eq!(p("F99", 0), -1);
+        assert_eq!(p("F7", -3), -3);
+    }
+
+    #[test]
+    fn format_and_parse_with_reference_are_inverse_across_the_window_edges() {
+        for reference in [
+            -10, 0, 1949, 1950, 2026, 2029, 2030, 2049, 2050, 2099, 2100, 9999,
+        ] {
+            for year in reference - 120..=reference + 120 {
+                for ty in TenorType::iterator() {
+                    for part in [0, ty.per_year() - 1] {
+                        let tenor = Tenor::from_parts(ty, year, part).unwrap();
+                        let text = tenor.format_with_reference(reference);
+                        if year < 0 {
+                            continue; // negative years do not print parseably
+                        }
+                        assert_eq!(
+                            Tenor::parse_with_reference(&text, reference),
+                            Ok(tenor),
+                            "{tenor:?} -> {text} at {reference}"
+                        );
+                        let full = format!("{tenor:#}");
+                        assert_eq!(Tenor::parse_with_reference(&full, reference), Ok(tenor));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_range_years_are_an_error_not_a_panic() {
+        let huge = isize::MAX.to_string();
+        for s in [
+            format!("F{huge}"),
+            format!("1Q{huge}"),
+            format!("{huge}Q1"),
+            format!("2H{huge}"),
+            format!("1HF{huge}"),
+            "C99999999999999999999999".to_string(),
+            "Cal99999999999999999999999".to_string(),
+            "99999999999999999999999".to_string(),
+            "F99999999999999999999999".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    s.parse::<Tenor>(),
+                    Err(TenorsError::UnparsableTenorString(_))
+                ),
+                "{s}"
+            );
+            assert!(
+                serde_json::from_str::<Tenor>(&format!("\"{s}\"")).is_err(),
+                "{s}"
+            );
+        }
+        assert!(Tenor::month_from_futures_code(&format!("F{huge}")).is_err());
+        // a reference at the edge of isize cannot open its window
+        assert!(Tenor::parse_with_reference("F24", isize::MIN).is_err());
+        assert!(Tenor::parse_with_reference("F7", isize::MIN).is_err());
+        assert!(Tenor::parse_with_reference("F24", isize::MAX).is_err());
+        // a Year's offset is the year minus 1970, so every isize year fits
         assert_eq!(
-            Tenor::year_from_y(c + 24).to_string(),
-            format!("{:04}", c + 24)
+            format!("C{huge}").parse::<Tenor>().map(|t| t.year()),
+            Ok(isize::MAX)
         );
-        // other centuries print the full year, zero-padded to four digits
-        assert_eq!(Tenor::year_from_y(999).to_string(), "0999");
-        assert_eq!(Tenor::month_from_ym0(1, 0).to_string(), "F0001");
-        assert_eq!(Tenor::month_from_ym0(1999, 0).to_string(), "F1999");
-        assert_eq!(Tenor::quarter_from_yq0(1969, 3).to_string(), "4Q1969");
+        // the largest year whose January fits still parses; its December does not
+        assert!(
+            format!("Z{}", (isize::MAX / 12) + TENOR_EPOCH)
+                .parse::<Tenor>()
+                .is_err()
+        );
+        let max_year = (isize::MAX / 12) + TENOR_EPOCH;
         assert_eq!(
-            Tenor::half_month_from_ymh0(2200, 5, 1).to_string(),
-            "2HM2200"
+            format!("F{max_year}").parse::<Tenor>().map(|t| t.year()),
+            Ok(max_year)
         );
     }
 
     #[test]
+    fn try_constructors_return_none_on_overflow() {
+        assert_eq!(Tenor::try_month_from_ym0(isize::MAX, 0), None);
+        assert_eq!(Tenor::try_quarter_from_yq0(isize::MIN, 0), None);
+        assert_eq!(Tenor::try_half_year_from_yh0(isize::MAX, 1), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "tenor offset overflow")]
+    fn plain_constructor_panics_with_a_message_below_the_epoch() {
+        let _ = Tenor::year_from_y(isize::MIN);
+    }
+
+    #[test]
+    #[should_panic(expected = "tenor offset overflow")]
+    fn half_month_constructor_panics_with_a_message() {
+        let _ = Tenor::half_month_from_ymh0(2024, isize::MAX, 0);
+    }
+
+    #[test]
     fn parse_month_codes() {
-        assert_eq!(t("F24"), Tenor::month_from_ym0(century() + 24, 0));
-        assert_eq!(t("Z99"), Tenor::month_from_ym0(century() + 99, 11));
-        assert_eq!(t("M00"), Tenor::month_from_ym0(century(), 5));
-        assert_eq!(t("F7"), Tenor::month_from_ym0(decade() + 7, 0));
-        assert_eq!(t("M0"), Tenor::month_from_ym0(decade(), 5));
+        assert_eq!(t("F24"), Tenor::month_from_ym0(yy(24), 0));
+        assert_eq!(t("Z99"), Tenor::month_from_ym0(yy(99), 11));
+        assert_eq!(t("M00"), Tenor::month_from_ym0(yy(0), 5));
+        assert_eq!(t("F7"), Tenor::month_from_ym0(y1(7), 0));
+        assert_eq!(t("M0"), Tenor::month_from_ym0(y1(0), 5));
         assert_eq!(t("F2024"), Tenor::month_from_ym0(2024, 0));
         assert_eq!(t("M1970"), Tenor::month_from_ym0(1970, 5));
         assert_eq!(t("F3000"), Tenor::month_from_ym0(3000, 0));
@@ -1181,11 +1427,11 @@ mod tests {
         );
         assert_eq!(
             cme_tenor_parser("DEC 32").unwrap(),
-            Tenor::month_from_ym0(century() + 32, 11)
+            Tenor::month_from_ym0(yy(32), 11)
         );
         assert_eq!(
             cme_tenor_parser("JLY 05").unwrap(),
-            Tenor::month_from_ym0(century() + 5, 6)
+            Tenor::month_from_ym0(yy(5), 6)
         );
         assert_eq!(cme_tenor_parser("jan 24").unwrap(), t("F24"));
         for bad in ["DEC32", "DEC 3", "XYZ 32", "DEC  2", ""] {
@@ -1195,15 +1441,14 @@ mod tests {
 
     #[test]
     fn parse_quarters_and_half_years() {
-        let c = century();
-        assert_eq!(t("1Q24"), Tenor::quarter_from_yq0(c + 24, 0));
-        assert_eq!(t("4Q27"), Tenor::quarter_from_yq0(c + 27, 3));
-        assert_eq!(t("24Q1"), Tenor::quarter_from_yq0(c + 24, 0));
+        assert_eq!(t("1Q24"), Tenor::quarter_from_yq0(yy(24), 0));
+        assert_eq!(t("4Q27"), Tenor::quarter_from_yq0(yy(27), 3));
+        assert_eq!(t("24Q1"), Tenor::quarter_from_yq0(yy(24), 0));
         assert_eq!(t("2025Q4"), Tenor::quarter_from_yq0(2025, 3));
         assert_eq!(t("3Q2026"), Tenor::quarter_from_yq0(2026, 2));
-        assert_eq!(t("1H24"), Tenor::half_year_from_yh0(c + 24, 0));
+        assert_eq!(t("1H24"), Tenor::half_year_from_yh0(yy(24), 0));
         assert_eq!(t("2H2025"), Tenor::half_year_from_yh0(2025, 1));
-        assert_eq!(t("24H1"), Tenor::half_year_from_yh0(c + 24, 0));
+        assert_eq!(t("24H1"), Tenor::half_year_from_yh0(yy(24), 0));
         assert_eq!(t("2025H2"), Tenor::half_year_from_yh0(2025, 1));
         for bad in [
             "0Q24", "5Q24", "24Q0", "24Q5", "0H24", "3H24", "24H0", "24H3", "1Q", "Q", "1Qx4",
@@ -1214,13 +1459,12 @@ mod tests {
 
     #[test]
     fn parse_years() {
-        let c = century();
-        assert_eq!(t("C24"), Tenor::year_from_y(c + 24));
-        assert_eq!(t("C00"), Tenor::year_from_y(c));
+        assert_eq!(t("C24"), Tenor::year_from_y(yy(24)));
+        assert_eq!(t("C00"), Tenor::year_from_y(yy(0)));
         assert_eq!(t("C2024"), Tenor::year_from_y(2024));
         assert_eq!(t("C1970"), Tenor::new(TenorType::Year, 0));
-        assert_eq!(t("Cal24"), Tenor::year_from_y(c + 24));
-        assert_eq!(t("CAL24"), Tenor::year_from_y(c + 24));
+        assert_eq!(t("Cal24"), Tenor::year_from_y(yy(24)));
+        assert_eq!(t("CAL24"), Tenor::year_from_y(yy(24)));
         assert_eq!(t("CaL2024"), Tenor::year_from_y(2024));
         assert_eq!(t("2024"), Tenor::year_from_y(2024));
         assert_eq!(t("1969"), Tenor::year_from_y(1969));
@@ -1235,9 +1479,8 @@ mod tests {
 
     #[test]
     fn parse_half_months() {
-        let c = century();
-        assert_eq!(t("1HF24"), Tenor::half_month_from_ymh0(c + 24, 0, 0));
-        assert_eq!(t("2HF24"), Tenor::half_month_from_ymh0(c + 24, 0, 1));
+        assert_eq!(t("1HF24"), Tenor::half_month_from_ymh0(yy(24), 0, 0));
+        assert_eq!(t("2HF24"), Tenor::half_month_from_ymh0(yy(24), 0, 1));
         assert_eq!(t("2HZ2024"), Tenor::half_month_from_ymh0(2024, 11, 1));
         for bad in ["3HF24", "1HA24", "1HF2", "1HF", "0HF24"] {
             assert!(bad.parse::<Tenor>().is_err(), "{bad}");
@@ -1291,9 +1534,9 @@ mod tests {
             1970,
             1999,
             2000,
-            century(),
-            century() + 24,
-            century() + 99,
+            yy(0),
+            yy(24),
+            yy(99),
             2100,
             2200,
             9999,
@@ -1302,7 +1545,7 @@ mod tests {
         for year in years {
             for ty in TenorType::iterator() {
                 for part in 0..ty.per_year() {
-                    let tenor = Tenor::from_parts(ty, year, part);
+                    let tenor = Tenor::from_parts(ty, year, part).unwrap();
                     let text = tenor.to_string();
                     assert_eq!(text.parse::<Tenor>().unwrap(), tenor, "{tenor:?} -> {text}");
                     checked += 1;
@@ -1313,21 +1556,32 @@ mod tests {
     }
 
     #[test]
-    fn serde_is_the_canonical_string() {
+    fn serde_is_the_full_year_string() {
         let m = Tenor::month_from_ym0(2024, 0);
         let json = serde_json::to_string(&m).unwrap();
-        assert_eq!(json, format!("\"{m}\""));
+        assert_eq!(json, r#""F2024""#);
         assert_eq!(serde_json::from_str::<Tenor>(&json).unwrap(), m);
+        let all = [
+            Tenor::half_month_from_ymh0(2099, 11, 1),
+            Tenor::month_from_ym0(1999, 0),
+            Tenor::quarter_from_yq0(2100, 0),
+            Tenor::half_year_from_yh0(999, 1),
+            Tenor::year_from_y(2024),
+        ];
+        let json = serde_json::to_string(&all).unwrap();
+        assert_eq!(json, r#"["2HZ2099","F1999","1Q2100","2H0999","2024"]"#);
+        assert_eq!(serde_json::from_str::<Vec<Tenor>>(&json).unwrap(), all);
+        // 0.2 wrote short years; they still deserialize against the clock
         let list: Vec<Tenor> =
             serde_json::from_str(r#"["1HF24","F24","1Q24","1H24","2024"]"#).unwrap();
         assert_eq!(
-            list.iter().map(|t| t.tenor_type()).collect::<Vec<_>>(),
+            list,
             [
-                TenorType::HalfMonth,
-                TenorType::Month,
-                TenorType::Quarter,
-                TenorType::HalfYear,
-                TenorType::Year
+                Tenor::half_month_from_ymh0(yy(24), 0, 0),
+                Tenor::month_from_ym0(yy(24), 0),
+                Tenor::quarter_from_yq0(yy(24), 0),
+                Tenor::half_year_from_yh0(yy(24), 0),
+                Tenor::year_from_y(2024),
             ]
         );
         assert!(serde_json::from_str::<Tenor>("\"nope\"").is_err());
