@@ -11,12 +11,16 @@ quoted in — and the futures contract codes that name them.
 - Five tenor types on one integer model: `HalfMonth`, `Month`, `Quarter`,
   `HalfYear`, `Year`, each a type plus an offset from a 1970 epoch.
 - Every type prints and parses the same way: `1HF24`, `F24`, `1Q24`, `1H24`,
-  `2024`. Futures codes with one-, two- or four-digit years (`F7`, `F24`,
-  `F2024`), period-first and year-first quarters and half-years (`1Q24`,
-  `24Q1`), `C24`/`Cal24` years, CME `DEC 32`.
-- Short years follow the clock: two digits resolve against the current
-  century, one digit against the current decade — or against a year you
-  supply with `Tenor::parse_with_reference`.
+  `2024`; `{:#}` prints the full year (`F2024`). Futures codes with one-,
+  two- or four-digit years (`F7`, `F24`, `F2024`), period-first and
+  year-first quarters and half-years (`1Q24`, `24Q1`), `C24`/`Cal24` years,
+  CME `DEC 32`.
+- Short years resolve through a sliding window around the current year — or
+  a year you supply with `Tenor::parse_with_reference`: two digits within
+  50 years back to 49 ahead (`F99` is 1999 in 2026), one digit from last
+  year to 8 years ahead (`F0` is 2030 in 2029).
+- Parsing never panics: malformed input and years whose offset would
+  overflow are an `Err`.
 - Cover and partition between granularities (`month.cover(Quarter)`,
   `year.partition(Month)`), calendar boundaries (`first_day`, `last_day`),
   half-months split like Platts' cycles: 1st–15th and 16th–end.
@@ -24,7 +28,8 @@ quoted in — and the futures contract codes that name them.
   type to a finer tenor (`month + 3 quarters`).
 - Forward-curve interpolation from cover constraints (`interpolation`),
   finest-first, with consistency validation.
-- Serde support: a tenor serialises as its canonical string.
+- Serde support: a tenor serialises as its full-year string (`"F2024"`), so
+  stored data does not change meaning as the clock moves on.
 
 ## Quick start
 
@@ -40,7 +45,7 @@ let feb_2024 = jan_2024.checked_add(1).unwrap();
 // durations of a coarser type
 let apr_2024 = (jan_2024 + TenorDuration::new(TenorType::Quarter)).unwrap();
 
-// calendar boundaries (None only outside chrono's year range)
+// calendar boundaries as jiff dates (None only outside years -9999..=9999)
 assert_eq!(jan_2024.first_day().unwrap().to_string(), "2024-01-01");
 assert_eq!(jan_2024.last_day().unwrap().to_string(), "2024-01-31");
 
