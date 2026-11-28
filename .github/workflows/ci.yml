@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, "release/**"]
   pull_request:
   schedule:
     - cron: "17 5 * * 1" # Mondays: catch new advisories and new toolchain lints
@@ -23,6 +23,7 @@ env:
 jobs:
   fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install stable --profile minimal --component rustfmt
@@ -30,6 +31,7 @@ jobs:
 
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install stable --profile minimal --component clippy
@@ -38,6 +40,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install stable --profile minimal
@@ -50,6 +53,7 @@ jobs:
 
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - name: Read rust-version from Cargo.toml
@@ -61,6 +65,7 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: taiki-e/install-action@v2
